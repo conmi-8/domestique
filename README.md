@@ -526,6 +526,12 @@ Two guard-rails on the eFTP loop: an **FTP-rise banner** appears only when your 
 
 Separate from G1–G7, the TSB scalar itself has dashboard hooks: TSB < −10 surfaces a "Recover" badge; TSB < −25 -> `reforecast()` drops the next hard session one tier (`vo2max -> threshold -> tempo`); TSB < −30 -> `daily_adapt_plan()` rescales remaining-week TSS to 0.6x as a forced de-load (Coggan/Allen overload threshold).
 
+### Lifting the load cap by hand (after a break)
+
+Each week's load is capped at 1.3 × the load you carry, a 28-day EWMA that counts every day off as zero, so after a break the cap sits well below what you trained at before it (two weeks off at CTL 70 caps the first week at 234 TSS), and a rebuild triggered by missed weeks opens with Z2-only recovery weeks. If you know you are fit to train, open **Settings → "Back from a break — lift the load cap until"**, pick a date and save; the app offers to rebuild the plan right away.
+
+Weeks starting on or before that date are built without the ACWR term, and a gap rebuild in that window lays no recovery ramp. Couzens' ramp, the target CTL, available hours, stepbacks and the taper still apply. **Clear** turns it off; once the date has passed it does nothing.
+
 ---
 
 ## Architecture overview

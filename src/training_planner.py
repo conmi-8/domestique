@@ -2959,6 +2959,27 @@ _CTL_WEEK_DECAY = (41 / 42) ** 7                  # of CTL, what a week leaves
 _TSS_PER_AVAILABLE_HOUR = 65                      # the planner's hours-to-load rate
 
 
+def acwr_cap_off_until() -> "date | None":
+    """The last day the rider has lifted the ACWR ceiling for (Settings tab,
+    ProfileManager.acwr_cap_off_until), or None when it is not set, not a
+    date, or already past. A manual switch for coming back from a break: the
+    ceiling multiplies a load that counts every day off as a zero. Until then
+    LoadRamp leaves the ACWR term out and the gap regen lays no recovery
+    ramp; every other guard stands."""
+    try:
+        from profile_manager import ProfileManager
+        raw = ProfileManager.get().acwr_cap_off_until
+    except Exception:  # noqa: BLE001 -- no profile: not set
+        return None
+    try:
+        until = date.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        until = None
+    if until is None:
+        return None
+    return until if until >= clock.today() else None
+
+
 class LoadRamp:
     """A plan's weekly budget, fed its week rows in order.
 
@@ -2977,7 +2998,8 @@ class LoadRamp:
     they carry allows 366 (2026-09-13).
     """
 
-    def __init__(self, ctl, chronic=None, target_ctl=None):
+    def __init__(self, ctl, chronic=None, target_ctl=None, cap_off_until=None):
+        self.cap_off_until = cap_off_until   # acwr_cap_off_until()
         self.ctl = float(ctl or 0.0)
         start = float(chronic or 0.0) or self.ctl * 7
         if start <= 0:
@@ -2998,8 +3020,11 @@ class LoadRamp:
 
     def budget(self, phase_name: str, is_stepback: bool = False,
                avail_tss: "float | None" = None,
-               taper_frac: "float | None" = None) -> float:
+               taper_frac: "float | None" = None,
+               on: "date | None" = None) -> float:
         """A full week's budget; a short row is prorated by its caller.
+        ``on`` is the row's first day, which places it against
+        ``cap_off_until``.
 
         An unload cuts from the last full load week -- a short row at a phase
         seam, scaled to a week, is two or three days' noise -- or, before
@@ -3026,7 +3051,8 @@ class LoadRamp:
         # The sweet spot guards every week, cuts included: an unload cut from
         # the last week before a holiday was budgeted at 343 against a cap
         # of 248 (the part 3 review, L-1).
-        load = min(load, ACWR_CEILING * self.chronic)
+        if not (self.cap_off_until and on and on <= self.cap_off_until):
+            load = min(load, ACWR_CEILING * self.chronic)
         if avail_tss is not None:
             load = min(load, avail_tss)
         return float(round(max(0.0, load)))
@@ -3067,7 +3093,8 @@ def _row_budget(ramp, goal, phase, cursor, is_stepback: bool) -> float:
     if phase.name == "taper":
         left = -(-((phase.end - cursor).days + 1) // 7)
         frac = TAPER_FRACS[max(0, len(TAPER_FRACS) - left)]
-    return ramp.budget(phase.name, is_stepback, hours * _TSS_PER_AVAILABLE_HOUR, frac)
+    return ramp.budget(phase.name, is_stepback, hours * _TSS_PER_AVAILABLE_HOUR, frac,
+                       on=cursor)
 
 
 def _row_load(pw, budget=None) -> float:
@@ -8922,7 +8949,8 @@ def generate_plan(
     # The week's budget, one number per week (Step 5 part 3).
     _ramp = LoadRamp(current_ctl, recent_weekly_tss,
                      None if goal.goal_type == "continuous"
-                     else plan_target_ctl(goal, current_ctl, event_targets)[1])
+                     else plan_target_ctl(goal, current_ctl, event_targets)[1],
+                     cap_off_until=acwr_cap_off_until())
     for phase in phases:
         # v1.6.1 — wrap each phase's per-week build so an exception inside
         # plan_week / sample_week_workouts / match_zwo surfaces as
@@ -13678,8 +13706,12 @@ def regenerate_from_today(
         elapsed_days = (today - old_plan_weeks[0].start).days if old_plan_weeks else 0
         remaining_days = max(7, total_plan_days - elapsed_days)
 
-    # 4. Build recovery ramp if needed
-    recovery_weeks = build_recovery_ramp(current_ctl, absence_days, goal)
+    # 4. Build recovery ramp if needed -- none while the rider has lifted
+    # the ACWR ceiling (acwr_cap_off_until): its weeks are Z2 at a fraction
+    # of the decayed CTL, the restriction the switch is there to lift.
+    cap_off_until = acwr_cap_off_until()
+    recovery_weeks = ([] if cap_off_until
+                      else build_recovery_ramp(current_ctl, absence_days, goal))
 
     # FC5d (v2.5.0, L3-6): the ramp must never plow training weeks past the
     # event — cap it at race + 2 weeks (post-race recovery riding is fine; a
@@ -13845,7 +13877,8 @@ def regenerate_from_today(
 
     # The week's budget runs on from the rider's CTL today, through the
     # recovery ramp's own weeks (Step 5 part 3).
-    _ramp = LoadRamp(current_ctl, recent_weekly_tss, adjusted_target)
+    _ramp = LoadRamp(current_ctl, recent_weekly_tss, adjusted_target,
+                     cap_off_until=cap_off_until)
     for rw in recovery_weeks:
         _ramp.follow(rw, rw.tss_target)
     for phase in new_phases:
@@ -14432,7 +14465,8 @@ def recalculate_plan(
 
     # The week's budget, one number per week (Step 5 part 3).
     _ramp = LoadRamp(current_ctl, recent_weekly_tss,
-                     plan_target_ctl(adjusted_goal, current_ctl, event_targets)[1])
+                     plan_target_ctl(adjusted_goal, current_ctl, event_targets)[1],
+                     cap_off_until=acwr_cap_off_until())
     for phase in new_phases:
         cursor = max(phase.start, regen_start)
         week_in_phase = 0  # v2.0.3 F6: 0-indexed within phase, drives the sampler
@@ -14860,7 +14894,8 @@ def extend_continuous_plan(
     # The week's budget runs on from the rider's CTL today through what is
     # still ahead in the weeks already planned (Step 5 part 3). A continuous
     # plan has no target; its guards bound it.
-    _ramp = LoadRamp(current_ctl, recent_weekly_tss)
+    _ramp = LoadRamp(current_ctl, recent_weekly_tss,
+                     cap_off_until=acwr_cap_off_until())
     for w in sorted(current_plan_weeks, key=lambda w: w.start):
         if w.end >= clock.today():
             _ramp.advance(_row_load(w, w.tss_target), (w.end - max(w.start, clock.today())).days + 1,

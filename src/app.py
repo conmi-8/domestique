@@ -8623,6 +8623,9 @@ def api_settings():
         "pmax_is_set": pm.pmax_is_set,
         "pmax_w": int(pm.pmax_w) if pm.pmax_is_set else None,
         "pmax_source": pm.pmax_source,
+        # The planner's manual switch after a break: the ACWR ceiling is
+        # lifted for weeks starting on or before this date (None: off).
+        "acwr_cap_off_until": pm.acwr_cap_off_until,
     }
 
 
@@ -8775,6 +8778,21 @@ def update_settings(request_body: dict):
         if cap_mode not in ("off", "prompt", "on"):
             raise HTTPException(400, "cap_short_intervals must be 'off', 'prompt', or 'on'")
         athlete_updates["cap_short_intervals"] = cap_mode
+
+    # The planner's ACWR ceiling, lifted by hand after a break until a date.
+    # Empty clears it; a past date would do nothing, so it 400s.
+    if "acwr_cap_off_until" in request_body:
+        raw = request_body["acwr_cap_off_until"]
+        if raw in (None, ""):
+            athlete_updates["acwr_cap_off_until"] = None
+        else:
+            try:
+                until = date.fromisoformat(str(raw))
+            except ValueError:
+                raise HTTPException(400, "acwr_cap_off_until must be a date (YYYY-MM-DD)")
+            if until < clock.today():
+                raise HTTPException(400, "acwr_cap_off_until is in the past")
+            athlete_updates["acwr_cap_off_until"] = until.isoformat()
 
     # E2 detect: did the FTP change to exactly-match the currently-cached
     # eFTP? If so this is almost certainly an "Accept eFTP" action.

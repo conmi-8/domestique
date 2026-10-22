@@ -969,6 +969,14 @@ class ProfileManager:
         v = str(self._athlete.get("cap_short_intervals", "off") or "off").lower()
         return v if v in ("off", "prompt", "on") else "off"
 
+    @property
+    def acwr_cap_off_until(self) -> "str | None":
+        """The last day the rider has lifted the planner's ACWR ceiling for
+        (an ISO date, set on the Settings tab), or None. Read and dated by
+        training_planner.acwr_cap_off_until."""
+        v = self._athlete.get("acwr_cap_off_until")
+        return v if isinstance(v, str) and v else None
+
     def _set_max_hr(self, value: int | float, source: str) -> bool:
         """v1.1.0 IMPL-NORWEGIAN-HR: shared write-path for `max_hr` with
         source tracking. Cloned from `_set_wprime` (v3.6.0-fix26 §4.1).

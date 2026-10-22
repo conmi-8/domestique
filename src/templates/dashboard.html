@@ -3222,6 +3222,20 @@ window.addEventListener('unhandledrejection', function(e) {
           <div id="cap-short-hint" style="font-size:11px;color:var(--text3);margin-top:4px;display:none;"></div>
         </div>
       </div>
+      <!-- The planner's manual switch after a break: lift the ACWR load cap
+           (and the gap rebuild's Z2-only recovery weeks) until a date. -->
+      <div class="form-row">
+        <div class="form-group">
+          <label>Back from a break — lift the load cap until
+            <span class="hint" title="After time off, each week's load is capped at 1.3x your recent load, which counts every day off as zero, so the plan comes back far lighter than what you trained at before the break, and a rebuild after missed weeks starts with easy-only weeks. If you know you are fit to train, pick a date: weeks starting on or before it are planned without that cap and without the easy-only weeks. Your available hours, the CTL ramp and recovery weeks still apply. Leave empty if you are coming back from injury or illness." style="margin-left:4px;cursor:help;color:var(--text3);border:1px solid var(--border);border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;">?</span>
+          </label>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="date" id="set-acwr-off">
+            <button type="button" class="btn" onclick="$('set-acwr-off').value=''">Clear</button>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px;">Empty = off. After saving you can rebuild the plan right away.</div>
+        </div>
+      </div>
       <!-- W1: HR workout-target rows (visible in hr mode). These are the
            PRESCRIPTION rows the charts/FIT/chips use — distinct from the Friel
            analysis zones below. Server-validated; Reset restores Coggan. -->
@@ -16209,6 +16223,13 @@ async function loadSettings() {
       }
     }
   }
+  // The planner's manual switch after a break (empty = off).
+  window._acwrOffUntil = d.acwr_cap_off_until || '';
+  const aoIn = $('set-acwr-off');
+  if (aoIn) {
+    aoIn.value = window._acwrOffUntil;
+    aoIn.min = new Date().toLocaleDateString('en-CA');
+  }
   // v4.1.0 U3: render FTP source badge
   renderFtpSourceBadge(d.ftp_source, d.ftp_source_date);
   // v4.1.0 U2: fetch + render FTP history chart (async, non-blocking).
@@ -16698,6 +16719,10 @@ async function saveSettings() {
   // measured Pmax; the server + serve gate both re-check pmax_is_set).
   const csSel2 = $('set-cap-short');
   if (csSel2 && !csSel2.disabled) body.cap_short_intervals = csSel2.value;
+  // The planner's manual switch after a break; empty clears it.
+  const aoIn2 = $('set-acwr-off');
+  const acwrOffChanged = !!aoIn2 && aoIn2.value !== (window._acwrOffUntil || '');
+  if (aoIn2) body.acwr_cap_off_until = aoIn2.value || null;
   // W1: include hr_rows_custom ONLY when the editor values differ from the
   // server-resolved rows (saving untouched defaults changes nothing — C1+).
   const hre2 = $('hr-rows-editor');
@@ -16752,6 +16777,14 @@ async function saveSettings() {
     }
     $('settings-saved').style.display = 'inline';
     setTimeout(() => $('settings-saved').style.display = 'none', 2000);
+    // The load cap only changes how weeks are built: offer the rebuild now.
+    if (acwrOffChanged) {
+      let hasPlan = false;
+      try { hasPlan = !!(await getResource('/api/plan').then(r => r.json())).plan_json; } catch(_) {}
+      if (hasPlan && confirm('Rebuild your plan now with the new load-cap setting?\n\nPast weeks and your edits are kept.')) {
+        await regeneratePlan();
+      }
+    }
     // Refresh cached FTP so downstream SVG renderers pick up the new value
     try {
       const s = await getResource('/api/settings').then(r => r.json());
