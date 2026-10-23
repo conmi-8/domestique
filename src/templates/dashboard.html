@@ -3351,6 +3351,33 @@ window.addEventListener('unhandledrejection', function(e) {
         <div id="icu-conn-error" style="display:none;font-size:12px;color:var(--red);margin-top:6px;"></div>
         <div id="icu-conn-help" style="font-size:11px;color:var(--text3);margin-top:6px;">Log in at intervals.icu and authorize Domestique — no copy-pasting keys.</div>
       </div>
+      <!-- Fork: manual API key, restored from before a93c784a (upstream removed
+           the UI; the backend Basic-auth path was kept). A sign-in token, when
+           present, wins over the key: Disconnect first to use the key. -->
+      <div style="margin-bottom:6px;">
+        <a href="#" id="icu-apikey-toggle" style="font-size:12px;color:var(--text2);text-decoration:underline;" onclick="event.preventDefault();const r=$('icu-apikey-block');r.style.display=r.style.display==='none'?'block':'none';">Advanced: paste an API key instead</a>
+      </div>
+      <div id="icu-apikey-block" style="display:none;">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">Your personal key from intervals.icu → Settings → Developer Settings. While you are signed in with the button above, the sign-in is used — Disconnect first to use the key.</div>
+        <div class="form-row">
+          <div class="form-group" style="flex:1;"><label>API Key</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="password" id="set-icu-api-key" placeholder="Paste your API key" style="flex:1;">
+              <button class="btn btn-sm" onclick="const inp=$('set-icu-api-key');inp.type=inp.type==='password'?'text':'password';this.textContent=inp.type==='password'?'Show':'Hide';">Show</button>
+            </div>
+          </div>
+        </div>
+        <div id="icu-athlete-id-detected" style="display:none;font-size:12px;color:var(--green);margin-bottom:8px;padding:6px 10px;background:rgba(76,175,80,0.08);border-radius:4px;"></div>
+        <div style="margin-bottom:8px;">
+          <a href="#" id="icu-advanced-toggle" style="font-size:12px;color:var(--text2);text-decoration:underline;" onclick="event.preventDefault();const r=$('icu-athlete-id-row');r.style.display=r.style.display==='none'?'block':'none';this.textContent=r.style.display==='none'?'Advanced: enter athlete ID manually':'Hide advanced';">Advanced: enter athlete ID manually</a>
+        </div>
+        <div class="form-row" id="icu-athlete-id-row" style="display:none;">
+          <div class="form-group" style="flex:1;"><label>Athlete ID (optional)</label>
+            <input type="text" id="set-icu-athlete-id" placeholder="(auto-detected from API key)"></div>
+        </div>
+        <button class="btn btn-primary" onclick="saveIcuCredentials()">Save ICU Credentials</button>
+        <span id="icu-saved" style="color:var(--green);font-size:12px;margin-left:8px;display:none;">Saved</span>
+      </div>
       <!-- v3.0.1 IP_ICU_PUSH: keep-in-sync toggle (default OFF). Hidden until
            the connection state is known; disabled with a reconnect hint when
            the OAuth grant lacks CALENDAR:WRITE. -->
@@ -3776,7 +3803,7 @@ document.querySelectorAll('.tab[data-tab]').forEach(t => {
                        initAvailCalendar();
                        loadCapabilityProjection();
                        icuPushRefreshButton();
-                     }, settings:()=>{loadSettings();loadIcuConnection();icuCalSyncRefresh();}, library:loadWorkouts,
+                     }, settings:()=>{loadSettings();loadIcuCredentials();loadIcuConnection();icuCalSyncRefresh();}, library:loadWorkouts,
                      analysis:()=>{ if (typeof loadAnalysisTab === 'function') loadAnalysisTab(); },
                      dfa:()=>{ if (typeof loadDfaTab === 'function') loadDfaTab(); }};
     if (loaders[tab]) loaders[tab]();
@@ -16799,6 +16826,56 @@ async function saveSettings() {
 
 // v2.1.x ICU OAuth — connection status + disconnect + callback-return handling.
 // (Manual API-key entry was removed — OAuth is the only setup path.)
+// Fork: manual API key (restored from before a93c784a).
+async function loadIcuCredentials() {
+  try {
+    const d = await (await getResource('/api/setup/defaults')).json();
+    const id = d.icu_id || '';
+    $('set-icu-athlete-id').value = id;
+    if (id) {
+      const badge = $('icu-athlete-id-detected');
+      badge.textContent = 'Saved athlete: ' + id;
+      badge.style.display = 'block';
+    }
+  } catch(e) { /* ignore */ }
+}
+
+async function saveIcuCredentials() {
+  const body = {
+    icu_athlete_id: $('set-icu-athlete-id').value.trim(),
+    icu_api_key: $('set-icu-api-key').value.trim(),
+  };
+  try {
+    const res = await fetch('/api/setup/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if (!res.ok) {
+      const errText = await res.text().catch(() => 'unknown');
+      throw new Error(`${res.status}: ${errText}`);
+    }
+    let payload = {};
+    try { payload = await res.json(); } catch (_) {}
+    if (payload.creds_test && String(payload.creds_test).startsWith('failed')) {
+      alert('Saved, but ICU rejected the new credentials: ' + payload.creds_test);
+    }
+    if (payload.athlete_id_detected) {
+      const badge = $('icu-athlete-id-detected');
+      const nm = payload.athlete_name ? ' — ' + payload.athlete_name : '';
+      badge.textContent = 'Auto-detected: ' + payload.athlete_id_detected + nm;
+      badge.style.display = 'block';
+      $('set-icu-athlete-id').value = payload.athlete_id_detected;
+    }
+    if (payload.warning) {
+      alert(payload.warning);
+    }
+    $('icu-saved').style.display = 'inline';
+    setTimeout(() => $('icu-saved').style.display = 'none', 2000);
+    $('set-icu-api-key').value = '';
+    $('set-icu-api-key').placeholder = 'Key saved (hidden)';
+    loadIcuConnection();
+  } catch(e) {
+    alert('Failed to save ICU credentials: ' + e.message);
+  }
+}
+
 async function loadIcuConnection() {
   const statusEl = $('icu-conn-status');
   try {
