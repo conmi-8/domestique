@@ -101,6 +101,11 @@ if os.path.exists("src/gpx"):
 if os.path.exists(".oauth.env"):
     datas.append(("../.oauth.env", "."))
 
+# Fork channel builds (docs/fork-updates.md): the identity fork-channel.yml
+# stamps before the build, read by channel_update.build_info. Absent upstream.
+if os.path.exists("BUILD_INFO.json"):
+    datas.append(("../BUILD_INFO.json", "."))
+
 # Previously we enumerated top-level `.py` modules explicitly and added them
 # as `datas`. PyInstaller's Analysis pass already picks them up via its
 # static-import scan from `launcher.py` → `app.py` → the rest of the tree,

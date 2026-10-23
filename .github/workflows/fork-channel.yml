@@ -1,0 +1,125 @@
+name: Fork channel build
+
+# Builds the Windows installer for every branch pushed to a FORK and publishes
+# it as that branch's update channel (docs/fork-updates.md): a rolling
+# prerelease tagged channel-<branch> holding Domestique-Setup.exe and
+# build.json. The installed app checks its own branch's channel and updates
+# itself in one click (src/channel_update.py). Never runs in the upstream
+# repository, whose releases are built by release.yml.
+#
+# A build is published only after its installer has installed silently on the
+# runner and the installed app has served this very commit: a build that
+# cannot start would also be unable to update itself to the fix.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the channel's tag and release
+
+concurrency:
+  group: channel-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.repository != 'platypus45/domestique'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      BRANCH: ${{ github.ref_name }}
+      SHA: ${{ github.sha }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stamp the build
+        shell: pwsh
+        run: |
+          $info = [ordered]@{
+            repo     = $env:REPO
+            branch   = $env:BRANCH
+            commit   = $env:SHA
+            built_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          }
+          $info | ConvertTo-Json | Set-Content -Encoding utf8NoBOM BUILD_INFO.json
+          Get-Content BUILD_INFO.json
+
+      # No OAuth client secret: a fork connects with a personal API key
+      # (Settings -> Intervals.icu -> Advanced). The spec bundles .oauth.env
+      # only when it exists.
+      - name: Build EXE
+        shell: cmd
+        run: |
+          call packaging\build_win.bat
+          if not exist dist\Domestique\Domestique.exe exit /b 1
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $ver = (Get-Content VERSION -Raw).Trim()
+          & $iscc "/DAppVersion=$ver" packaging\domestique.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Item dist\Domestique-Setup.exe | Format-List Name, Length
+
+      - name: "Smoke-test: silent install starts the app at this commit"
+        shell: pwsh
+        run: |
+          # Inherited by the app the installer starts: no window on the runner.
+          $env:DOMESTIQUE_SERVER_ONLY = "1"
+          # WaitForExit, not -Wait: -Wait also waits for the app the installer
+          # starts, which keeps running.
+          $p = Start-Process dist\Domestique-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          $null = $p.Handle   # keeps ExitCode readable after exit
+          if (-not $p.WaitForExit(600000)) { Write-Host "::error::installer did not finish in 10 min"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Host "::error::installer exited $($p.ExitCode)"; exit 1 }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\Domestique\Domestique.exe"
+          if (-not (Test-Path $exe)) { Write-Host "::error::not installed at $exe"; exit 1 }
+          $served = $null
+          $deadline = (Get-Date).AddSeconds(180)
+          while ((Get-Date) -lt $deadline -and -not $served) {
+            try { $served = Invoke-RestMethod http://127.0.0.1:22400/api/version -TimeoutSec 5 } catch { Start-Sleep -Seconds 3 }
+          }
+          Get-Process Domestique -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $served) { Write-Host "::error::the installed app never answered"; exit 1 }
+          if ($served.build.commit -ne $env:SHA) {
+            Write-Host "::error::installed app serves build $($served.build.commit), expected $env:SHA"; exit 1
+          }
+          Write-Host "OK: installed app serves $($served.version) at $($served.build.branch)@$($served.build.commit)"
+
+      - name: Publish the channel
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $info = Get-Content BUILD_INFO.json -Raw | ConvertFrom-Json
+          $info | Add-Member sha256 (Get-FileHash dist\Domestique-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          $info | ConvertTo-Json | Set-Content -Encoding utf8NoBOM dist\build.json
+          # src/channel_update.channel_tag names it the same way.
+          $tag = "channel-" + ($env:BRANCH -replace '[^A-Za-z0-9._-]', '-')
+          git tag -f $tag $env:SHA
+          git push -f origin "refs/tags/$tag"
+          $notes = "Rolling build of branch ``$env:BRANCH`` at $($env:SHA.Substring(0,7)). Install Domestique-Setup.exe once; after that the app updates itself (Settings -> Updates)."
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --prerelease --verify-tag --title $env:BRANCH --notes $notes
+          } else {
+            gh release edit $tag --prerelease --title $env:BRANCH --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The installer first, build.json (its checksum) last: an app that
+          # reads the old build.json against the new installer refuses the
+          # mismatch and tries again later.
+          gh release upload $tag dist\Domestique-Setup.exe --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release upload $tag dist\build.json --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "Published $tag"

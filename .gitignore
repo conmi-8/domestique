@@ -90,3 +90,6 @@ gen_*.zwo
 # Packaging generates them: see tools/build-library-caches.py.
 src/workouts/.library_index.json
 src/workouts/.workout_facts.json
+
+# Fork channel build identity, stamped by CI (fork-channel.yml)
+BUILD_INFO.json
