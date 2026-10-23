@@ -7352,6 +7352,8 @@ def api_version():
         "python": platform.python_version(),
         "frozen": getattr(sys, "frozen", False),
         "data_dir": str(domestique_home()),
+        # A fork channel build's identity (channel_update), None upstream.
+        "build": _BUILD_INFO,
     }
 
 
@@ -7381,6 +7383,12 @@ def api_migrations_last_run_result():
 #     asset_name, platform, checked_at, cached, error, release_body }
 _UPDATE_CHECK_CACHE_TTL_S = 6 * 60 * 60  # 6 hours
 _GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/platypus45/domestique/releases/latest"
+
+import httpx  # noqa: E402
+import channel_update  # noqa: E402
+# A fork channel build updates from its own branch (channel_update); the
+# upstream release check above then only tells it upstream has moved on.
+_BUILD_INFO = channel_update.build_info()
 _RELEASE_BODY_MAX_CHARS = 8192
 _RELEASE_BODY_TRUNCATION_SUFFIX = "\n\n… (full release notes on GitHub)"
 
@@ -8449,6 +8457,16 @@ def api_icu_athlete_numbers():
 
 @app.get("/api/update/check")
 def api_update_check(force: int = Query(0)):
+    """The upstream release check. A fork channel build gets the same answer
+    with no download (``managed``): it updates from its own branch, and
+    upstream's release is news, not an install."""
+    out = _upstream_update_check(force)
+    if _BUILD_INFO:
+        out = {**out, "download_url": None, "asset_name": None, "managed": True}
+    return out
+
+
+def _upstream_update_check(force: int = 0):
     """Live GitHub-Releases poll with 6h cache + platform-specific asset.
 
     Always returns 200; on upstream failure, populates `error` and returns
@@ -8550,6 +8568,45 @@ def api_update_check(force: int = Query(0)):
             "error": str(e),
             "release_body": None,
         }
+
+
+@app.get("/api/update/channel")
+def api_update_channel(branch: str = Query("")):
+    """A fork channel build's update state: this build, the latest build of
+    ``branch`` (default: its own), and the branches with a published build.
+    ``managed`` is False for any build no fork CI stamped."""
+    if not _BUILD_INFO:
+        return {"managed": False}
+    out = {"managed": True, "current": _BUILD_INFO,
+           "can_update": channel_update.can_self_update(_BUILD_INFO),
+           "latest": None, "update_available": False, "channels": [], "error": None}
+    branch = branch or _BUILD_INFO["branch"]
+    try:
+        out["channels"] = channel_update.channels(_BUILD_INFO["repo"])
+        latest = channel_update.channel_build(_BUILD_INFO["repo"], branch)
+        out["latest"] = {k: v for k, v in latest.items() if k != "setup_url"}
+        out["update_available"] = channel_update.is_update(_BUILD_INFO, latest)
+    except (channel_update.UpdateError, httpx.HTTPError, ValueError, KeyError) as e:
+        out["error"] = str(e)
+    return out
+
+
+@app.post("/api/update/apply")
+def api_update_apply(body: dict):
+    """Install the latest build of ``body["branch"]`` (default: this build's
+    branch): download, verify, start the installer, exit. Windows installed
+    builds only."""
+    if not channel_update.can_self_update(_BUILD_INFO):
+        raise HTTPException(400, "only the installed Windows build of a fork updates itself")
+    branch = str((body or {}).get("branch") or _BUILD_INFO["branch"])
+    try:
+        latest = channel_update.channel_build(_BUILD_INFO["repo"], branch)
+        installer = channel_update.download_verified(latest["setup_url"], latest["sha256"])
+    except (channel_update.UpdateError, httpx.HTTPError) as e:
+        raise HTTPException(502, str(e))
+    _log.info("EVENT=channel_update branch=%s commit=%s", branch, latest["commit"])
+    channel_update.launch_and_exit(installer)
+    return {"ok": True, "branch": branch, "commit": latest["commit"]}
 
 
 @app.get("/api/settings")

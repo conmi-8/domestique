@@ -1563,6 +1563,9 @@ window.addEventListener('unhandledrejection', function(e) {
      Populated by loadUpdateCheck() from /api/update/check (cached 6h server-side).
      Dismissable per-version via localStorage('update-banner-dismissed-<latest>'). -->
 <div id="update-banner" style="display:none;margin:8px 0 12px;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.4;"></div>
+<!-- Fork channel builds: a newer build of this branch, installed in one click.
+     Populated by loadChannelUpdate() from /api/update/channel. -->
+<div id="channel-update-banner" style="display:none;margin:8px 0 12px;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.4;background:rgba(34,197,94,0.10);border:1px solid rgba(34,197,94,0.35);color:var(--text);"></div>
 
 <!-- v4.1.0 U6: Readiness action banner (DFA cap / decoupling advisory) -->
 <div id="readiness-action-banner" style="display:none;margin:8px 0 12px;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.4;background:rgba(234,179,8,0.12);border:1px solid #eab308;color:var(--text);"></div>
@@ -3398,6 +3401,22 @@ window.addEventListener('unhandledrejection', function(e) {
       </div>
     </div>
 
+    <!-- Fork channel builds: which branch this build is, and installing the
+         latest build of any branch (renderUpdatesCard). Hidden upstream. -->
+    <div id="updates-card" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;margin-top:12px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <strong style="font-size:14px;">Updates</strong>
+        <span id="updates-current" style="font-size:12px;color:var(--text3);margin-left:auto;"></span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text2);">Branch</label>
+        <select id="updates-branch"></select>
+        <button class="btn btn-sm" onclick="checkUpdatesBranch()">Check</button>
+        <button class="btn btn-sm btn-primary" id="updates-install" onclick="applyChannelUpdate($('updates-branch').value)">Install latest build</button>
+      </div>
+      <div id="updates-status" style="font-size:12px;color:var(--text3);margin-top:6px;"></div>
+    </div>
+
     <!-- v1.1.0 IMPL-HRV-RECOVERY — HRV4Training CSV import + manual HRV entry.
          Locked CSV columns (PATCH G16): date, rmssd, hrv_baseline, recovery_points.
          Rows missing date or rmssd are skipped server-side. -->
@@ -3803,7 +3822,7 @@ document.querySelectorAll('.tab[data-tab]').forEach(t => {
                        initAvailCalendar();
                        loadCapabilityProjection();
                        icuPushRefreshButton();
-                     }, settings:()=>{loadSettings();loadIcuCredentials();loadIcuConnection();icuCalSyncRefresh();}, library:loadWorkouts,
+                     }, settings:()=>{loadSettings();loadIcuCredentials();loadIcuConnection();icuCalSyncRefresh();loadChannelUpdate();}, library:loadWorkouts,
                      analysis:()=>{ if (typeof loadAnalysisTab === 'function') loadAnalysisTab(); },
                      dfa:()=>{ if (typeof loadDfaTab === 'function') loadDfaTab(); }};
     if (loaders[tab]) loaders[tab]();
@@ -20529,6 +20548,23 @@ async function loadUpdateCheck(force) {
     if (!r.ok) { el.style.display = 'none'; return; }
     const u = await r.json();
     if (!u || !u.update_available || !u.latest) { el.style.display = 'none'; return; }
+    // A fork channel build updates from its own branch: upstream's release is
+    // news to merge, not something to install over the fork.
+    if (u.managed) {
+      const k = 'update-banner-dismissed-' + u.latest;
+      if (localStorage.getItem(k) === '1') { el.style.display = 'none'; return; }
+      el.innerHTML = '<div style="display:flex;align-items:flex-start;gap:10px;"><div style="flex:1;">' +
+        '<strong>Upstream released v' + esc(u.latest) + '</strong> &mdash; this build is based on v' + esc(u.current) +
+        '. Merge it into your branch to get it. ' +
+        '<a href="' + esc(u.release_url || '#') + '" target="_blank" rel="noopener noreferrer" style="color:#3b82f6;">Release notes</a></div>' +
+        '<button onclick="dismissUpdateBanner(\'' + escJs(u.latest) + '\')" aria-label="Dismiss" ' +
+        'style="background:none;border:0;color:inherit;font-size:18px;cursor:pointer;opacity:0.6;line-height:1;">&times;</button></div>';
+      el.style.background = 'rgba(148,163,184,0.10)';
+      el.style.border = '1px solid rgba(148,163,184,0.35)';
+      el.style.color = 'var(--text)';
+      el.style.display = 'block';
+      return;
+    }
     // Skip Linux/BSD or any platform without a pinned download asset.
     if (!u.download_url) { el.style.display = 'none'; return; }
     // Per-version dismissal flag.
@@ -20595,6 +20631,80 @@ async function loadUpdateCheck(force) {
     el.style.display = 'none';
   }
 }
+// Fork channel builds (src/channel_update.py): this build's branch publishes a
+// newer build -> one click downloads, verifies and installs it, and the app
+// restarts. Hidden for any build no fork CI stamped.
+async function loadChannelUpdate() {
+  const el = document.getElementById('channel-update-banner');
+  if (!el) return;
+  try {
+    const c = await (await fetch('/api/update/channel')).json();
+    renderUpdatesCard(c);
+    if (!c.managed || !c.update_available || !c.latest) { el.style.display = 'none'; return; }
+    const L = c.latest, cur = c.current;
+    el.innerHTML = '<strong>Update available on ' + esc(cur.branch) + '</strong> &mdash; ' +
+      esc(cur.commit.slice(0, 7)) + ' &rarr; ' + esc(L.commit.slice(0, 7)) +
+      ' <span style="opacity:0.7;">(built ' + esc(L.built_at) + ')</span>' +
+      (c.can_update
+        ? ' <button class="btn btn-sm btn-primary" style="margin-left:8px;" onclick="applyChannelUpdate(\'' + escJs(cur.branch) + '\')">Update now</button>'
+        : ' <span style="opacity:0.7;">(install it from the release page — only the installed Windows build updates itself)</span>');
+    el.style.display = 'block';
+  } catch (e) {
+    el.style.display = 'none';
+  }
+}
+
+async function applyChannelUpdate(branch) {
+  if (!confirm('Install the latest build of ' + branch + '?\n\nDomestique closes, installs it and starts again. Your rides, plan and settings are kept.')) return;
+  const el = document.getElementById('channel-update-banner');
+  try {
+    const r = await fetch('/api/update/apply', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({branch: branch})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    if (el) { el.textContent = 'Installing ' + branch + ' @ ' + String(d.commit || '').slice(0, 7) + ' — Domestique will restart in a moment…'; el.style.display = 'block'; }
+  } catch (e) {
+    alert('Update failed: ' + e.message);
+  }
+}
+
+// Settings -> Updates: this build, and any branch's latest build.
+function renderUpdatesCard(c) {
+  const card = document.getElementById('updates-card');
+  if (!card) return;
+  if (!c || !c.managed) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  const cur = c.current;
+  $('updates-current').textContent = cur.branch + ' @ ' + cur.commit.slice(0, 7) + ' (built ' + cur.built_at + ')';
+  const sel = $('updates-branch');
+  const keep = sel.value || cur.branch;
+  const names = (c.channels || []).map(ch => ch.branch);
+  if (!names.includes(cur.branch)) names.unshift(cur.branch);
+  sel.innerHTML = names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+  sel.value = names.includes(keep) ? keep : cur.branch;
+  $('updates-install').disabled = !c.can_update;
+  $('updates-status').textContent = c.error ? ('Could not check: ' + c.error)
+    : (c.can_update ? '' : 'Only the installed Windows build updates itself.');
+}
+
+async function checkUpdatesBranch() {
+  const branch = $('updates-branch').value;
+  $('updates-status').textContent = 'Checking ' + branch + '…';
+  try {
+    const c = await (await fetch('/api/update/channel?branch=' + encodeURIComponent(branch))).json();
+    renderUpdatesCard(c);
+    $('updates-branch').value = branch;
+    if (c.error) return;
+    const L = c.latest;
+    $('updates-status').textContent = L
+      ? (branch + ' @ ' + L.commit.slice(0, 7) + ' (built ' + L.built_at + ')' +
+         (c.update_available ? ' — can be installed.' : ' — this is the build you are running.'))
+      : 'No published build for ' + branch + '.';
+  } catch (e) {
+    $('updates-status').textContent = 'Could not check: ' + e.message;
+  }
+}
+
 function dismissUpdateBanner(latest) {
   try { localStorage.setItem('update-banner-dismissed-' + latest, '1'); } catch (_) {}
   const el = document.getElementById('update-banner');
@@ -21469,6 +21579,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // unauthenticated rate limit.
   try { loadUpdateCheck(true); } catch (_) {}
   setInterval(() => { try { loadUpdateCheck(true); } catch (_) {} }, 3 * 60 * 60 * 1000);
+  try { loadChannelUpdate(); } catch (_) {}
+  setInterval(() => { try { loadChannelUpdate(); } catch (_) {} }, 3 * 60 * 60 * 1000);
   // ICU OAuth: toast the callback bounce + refresh connection status on load.
   try { handleIcuOauthReturn(); } catch (_) {}
   try { maybePromptIcuMigration(); } catch (_) {}
@@ -21482,7 +21594,8 @@ document.addEventListener('DOMContentLoaded', () => {
   try {
     fetch('/api/version').then(r => r.json()).then(v => {
       const el = document.getElementById('app-version');
-      if (el && v && v.version) el.textContent = 'v' + v.version;
+      if (el && v && v.version) el.textContent = 'v' + v.version +
+        (v.build ? ' · ' + v.build.branch + '@' + v.build.commit.slice(0, 7) : '');
     }).catch(() => {});
   } catch (_) {}
   try { loadIcuConnection(); } catch (_) {}
