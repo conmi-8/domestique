@@ -353,14 +353,14 @@ FTP anchors roughly one boundary (~LT2). DFA adds the **aerobic-threshold (LT1 /
 - **Rønnestad et al. 2020** (PMID [31977120](https://pubmed.ncbi.nlm.nih.gov/31977120/)): 3 weeks, 3×/week. Elite cyclists (VO2max ~73). Short intervals: **+4.7% 20-min power, +3.7% peak aerobic power**. Long intervals: -1.4% and -0.3%. Confirms superiority even in elite.
 
 ### Seiler 4×8min — Best Long Interval for Threshold
-- **Seiler et al. 2013** (PMID [21812820](https://pubmed.ncbi.nlm.nih.gov/21812820/)): 7 weeks, 2×/week. Compared 4×4, 4×8, 4×16. **4×8min @~106% FTP = +11.4% VO2max, +16.2% threshold power**. 4×4: +5.5% VO2, +8% threshold. 4×16: +6.5% VO2, +9% threshold. Recreational trained (VO2max ~52).
+- **Seiler et al. 2013** (PMID [21812820](https://pubmed.ncbi.nlm.nih.gov/21812820/)): 7 weeks, 2×/week. Compared 4×4, 4×8, 4×16. **4×8min @~106% FTP gave the largest overall gain in VO2peak, power at VO2peak and power at 4 mmol/L: 11.4% (95% CI 8.0–14.9)**, vs 5.6% (4×16), 5.5% (4×4) and 4.2% (low intensity only). (The per-outcome figures quoted here before, +16.2% threshold power for 4×8, +8% for 4×4 and +9% for 4×16, are not in the abstract and are unverified.) Recreational trained (VO2max ~52).
 
 ### Polarized > Threshold-Only for FTP
 - **Stöggl & Sperlich 2014** (PMC [3912323](https://pmc.ncbi.nlm.nih.gov/articles/PMC3912323/)): 9 weeks, 4-arm comparison. POL (68/6/26%): **+11.7% VO2peak, +8.1% power@4mmol, +5.1% peak power**. THR (46/54/0%): -0.6% VO2, +1.4% threshold (NS). **Threshold-only was the WORST of all 4 approaches.** Mechanism: raising the VO2max ceiling raises FTP.
 - **Neal et al. 2013** (PMID [23264537](https://pubmed.ncbi.nlm.nih.gov/23264537/)): 6 weeks. POL 80/0/20: **+8% peak power, +9% LT power**. THR 57/43/0: +3%, +2%. Polarized in LESS volume (6.4 vs 7.5 h/wk) produced greater gains.
 
 ### 2024 Meta-Analysis
-- **Molmen et al. 2024** (J Sci Med Sport, [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S1440244024005966)): 41 studies, 797 trained cyclists. VO2max effect g=0.42, TT performance g=0.39. **No significant difference between polarized and non-polarized** at meta-analytic level. Both work if they include Z1 volume + Z5 intensity.
+- **Cove et al. 2025** (J Sci Med Sport 28:423-434, PMID [39788807](https://pubmed.ncbi.nlm.nih.gov/39788807/); previously misattributed here to Molmen et al. 2024): 41 studies, 797 trained cyclists. VO2max effect g=0.42, TT performance g=0.39. **No significant difference between polarized and non-polarized** at meta-analytic level. Both work if they include Z1 volume + Z5 intensity.
 
 ### Expected FTP Gains (trained cyclist, ~250W)
 - Conservative: +3-5% (7-12W) over 8-12 weeks
@@ -413,7 +413,7 @@ POL group improved **BOTH** VO2peak +11.7% AND power@4mmol +8.1% simultaneously.
 POL (80/0/20) improved **BOTH** peak power +8% AND lactate threshold +9%. In LESS total volume than the threshold group.
 
 ### Rønnestad Block Periodization
-- **Rønnestad et al. 2012** (PMID [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/)): 12 weeks. Block (5 HIT every 4th week, 1 HIT other weeks) vs traditional (2 HIT/week). **Block: +8.8% VO2max, +22% LT power, +8.2% 40min TT**. Traditional: +3.7%, +10%, +4.1%.
+- **Rønnestad et al. 2012** (PMID [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/)): 12 weeks. Block (5 HIT every 4th week, 1 HIT other weeks) vs traditional (2 HIT/week). **Block: +8.8% VO2max, power at 2 mmol/L +22 ± 14%** vs traditional +3.7% and +10 ± 7% (the 2 mmol/L difference is a non-significant trend, P = 0.054). The 40-min TT figures quoted here before (+8.2% vs +4.1%) are not in the abstract and are unverified.
 - **Rønnestad et al. 2012b** (PMID [22646668](https://pubmed.ncbi.nlm.nih.gov/22646668/)): 4-week block. BP increased VO2max +4.6% while traditional showed no change.
 
 ### Pyramidal-to-Polarized Sequencing
@@ -488,13 +488,13 @@ POL (80/0/20) improved **BOTH** peak power +8% AND lactate threshold +9%. In LES
 | Stöggl & Sperlich | 2014 | [PMC3912323](https://pmc.ncbi.nlm.nih.gov/articles/PMC3912323/) | POL > THR > HIT > HVT |
 | Neal et al. | 2013 | [23264537](https://pubmed.ncbi.nlm.nih.gov/23264537/) | POL > THR in trained cyclists |
 | Tønnessen et al. | 2024 | [doi:10.1007/s40279-024-02067-4](https://doi.org/10.1007/s40279-024-02067-4) | Session models in endurance sports |
-| Molmen et al. | 2024 | [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S1440244024005966) | Meta-analysis: POL ≈ non-POL |
+| Cove et al. | 2025 | [39788807](https://pubmed.ncbi.nlm.nih.gov/39788807/) | Meta-analysis: POL ≈ non-POL |
 
 ### VO2max Protocols
 | Authors | Year | PMID/Source | Key Finding |
 |---------|------|-------------|-------------|
 | Helgerud et al. | 2007 | [17414804](https://pubmed.ncbi.nlm.nih.gov/17414804/) | 4×4min = +7.2% VO2max |
-| Seiler et al. | 2013 | [21812820](https://pubmed.ncbi.nlm.nih.gov/21812820/) | 4×8min = +11.4% VO2max, +16% threshold |
+| Seiler et al. | 2013 | [21812820](https://pubmed.ncbi.nlm.nih.gov/21812820/) | 4×8min = +11.4% composite (VO2peak, P@VO2peak, P@4 mM) |
 | Rønnestad et al. | 2020 | [31977120](https://pubmed.ncbi.nlm.nih.gov/31977120/) | 30/15s > 4×5min in elite cyclists |
 | Rønnestad et al. | 2014 | [24382021](https://pubmed.ncbi.nlm.nih.gov/24382021/) | 30/15s = +12% FTP, +8.7% VO2max (10wk) |
 | Bossi et al. | 2020 | [32244222](https://pubmed.ncbi.nlm.nih.gov/32244222/) | Alternating intervals +43% time at VO2max |
@@ -504,7 +504,7 @@ POL (80/0/20) improved **BOTH** peak power +8% AND lactate threshold +9%. In LES
 ### Block Periodization
 | Authors | Year | PMID/Source | Key Finding |
 |---------|------|-------------|-------------|
-| Rønnestad et al. | 2012a | [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/) | Block: +8.8% VO2, +22% LT, +8.2% TT |
+| Rønnestad et al. | 2012a | [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/) | Block: +8.8% VO2, +22% P@2 mmol (ns trend) |
 | Rønnestad et al. | 2012b | [22646668](https://pubmed.ncbi.nlm.nih.gov/22646668/) | 4-week block: +4.6% VO2max |
 
 ### HRV-Guided Training

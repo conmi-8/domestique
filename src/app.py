@@ -11449,6 +11449,66 @@ def api_event_projection():
     return projection
 
 
+@app.get("/api/plan/ftp-projection")
+def api_plan_ftp_projection():
+    """Projected FTP at the end of the stored plan (src/ftp_projection.py,
+    docs/SCIENCE.md §3b). Read-only. Returns 200 with
+    ``{"available": False, "reason": ...}`` when it does not apply; a
+    malformed stored plan is reported the same way, never as a 500."""
+    import ftp_projection
+    plan_path = _plan_dir() / "current_plan.json"
+    if not plan_path.exists():
+        return {"available": False, "reason": "no_plan"}
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return {"available": False, "reason": f"plan_load_error: {e}"}
+    if not isinstance(plan, dict) or not plan.get("weeks"):
+        return {"available": False, "reason": "no_plan"}
+
+    from profile_manager import ProfileManager
+    pm = ProfileManager.get()
+    ftp = pm._athlete.get("ftp")
+    weight = pm._athlete.get("weight_kg")
+    if not ftp:
+        return {"available": False, "reason": "no_ftp"}
+    if not weight:
+        return {"available": False, "reason": "no_weight"}
+
+    try:
+        ctl = _fitness_state()["ctl"]  # None = unknown (the planning fallback)
+    except Exception:
+        ctl = None
+
+    # The rider's own past blocks; any failure just means no personalisation.
+    today = clock.today()
+    history, daily_tss, ctl_by_day = [], {}, {}
+    try:
+        history = api_profile_ftp_history()["history"]
+        import tau_fitting
+        days = ftp_projection.HISTORY_MAX_DAYS
+        loads = tau_fitting._build_daily_load_series(
+            db.get_db(), (today - timedelta(days=days + 120)).isoformat(),
+            today.isoformat())
+        daily_tss = dict(loads)
+        ctl_by_day = {r["date"]: r["ctl"] for r in db.query_wellness(days)
+                      if r.get("ctl")}
+        if not ctl_by_day and loads:
+            # No intervals.icu CTL: the local EWMA, warmed up 120 days.
+            ewma = tau_fitting._ewma_series([v for _, v in loads], 42.0)
+            ctl_by_day = {d: c for (d, _), c in zip(loads, ewma)}
+    except Exception as e:
+        _log.debug(f"ftp projection: history skipped ({e})")
+
+    try:
+        return ftp_projection.build_projection(
+            plan, float(ftp), float(weight), ctl, pm.sex, today,
+            history=history, daily_tss=daily_tss, ctl_by_day=ctl_by_day)
+    except Exception as e:
+        _log.warning(f"ftp projection: malformed plan ({e})")
+        return {"available": False, "reason": "plan_malformed"}
+
+
 def _replaced_weeks_before(old_plan: dict, cutoff: date) -> list[dict]:
     """The rows of ``old_plan`` a Generate replaces, as far as they were
     prescribed before ``cutoff``: every session dated before it, in its row,

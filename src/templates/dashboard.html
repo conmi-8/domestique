@@ -2462,6 +2462,12 @@ window.addEventListener('unhandledrejection', function(e) {
       <div id="plan-summary"></div>
     </div>
   </div>
+  <!-- Projected FTP at plan end (/api/plan/ftp-projection). Outside
+       #legacy-plan-grid so the Calendar view shows it too. -->
+  <div id="ftp-projection-card" class="card" style="margin-top:12px;display:none;">
+    <h3>Projected FTP</h3>
+    <div id="ftp-proj-body"></div>
+  </div>
   <!-- v4.6.7 IMPL-SUM: summary modal BEGIN -->
   <div id="programme-summary-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.65);overflow:auto;">
     <div id="programme-summary-content" style="background:var(--surface);max-width:1200px;margin:24px auto;padding:24px;border-radius:12px;border:1px solid var(--border);color:var(--text);">
@@ -3821,6 +3827,7 @@ document.querySelectorAll('.tab[data-tab]').forEach(t => {
                        loadPlanMetrics();
                        initAvailCalendar();
                        loadCapabilityProjection();
+                       loadFtpProjection();
                        icuPushRefreshButton();
                      }, settings:()=>{loadSettings();loadIcuCredentials();loadIcuConnection();icuCalSyncRefresh();loadChannelUpdate();}, library:loadWorkouts,
                      analysis:()=>{ if (typeof loadAnalysisTab === 'function') loadAnalysisTab(); },
@@ -6891,6 +6898,52 @@ async function loadCapabilityProjection() {
     console.warn('capability projection failed:', e);
     card.style.display = 'none';
   }
+}
+
+async function loadFtpProjection() {
+  const card = $('ftp-projection-card');
+  if (!card) return;
+  try {
+    const res = await fetch('/api/plan/ftp-projection');
+    if (!res.ok) { card.style.display = 'none'; return; }
+    const p = await res.json();
+    if (!p.available) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    renderFtpProjection(p);
+  } catch(e) {
+    console.warn('ftp projection failed:', e);
+    card.style.display = 'none';
+  }
+}
+
+function renderFtpProjection(p) {
+  const body = $('ftp-proj-body');
+  if (!body) return;
+  const n = Math.round(p.weeks);
+  const w = p.watts || {};
+  const headline = p.within_noise
+    ? `FTP likely to hold (within test noise) over ${n} weeks <span style="color:var(--text3);font-size:12px;">(${w.conservative}–${w.optimistic} W)</span>`
+    : `~${w.central} W in ${n} weeks <span style="color:var(--text3);font-size:12px;">(${w.conservative}–${w.optimistic} W)</span>`;
+  const inputs = [
+    `Tier ${p.tier} (${esc(p.tier_label)})`,
+    `FTP ${p.ftp} W`,
+    p.ctl_unknown ? 'CTL unknown (tier from W/kg only)' : `CTL ${Math.round(p.ctl)}`,
+    `${p.hit_per_week} hard sessions/wk${p.sweetspot_only ? ' (sweet spot only, counted as 1)' : ''}`,
+    p.load_ratio === null ? 'load ratio n/a' : `load ratio ${p.load_ratio}`,
+  ].join(' · ');
+  const g = p.gain_pct || {};
+  const notes = [];
+  if (p.held_flat) notes.push('The evidence ends at ~16 weeks; the projection is held flat beyond that.');
+  if (p.personalised) notes.push(`Narrowed with ${p.personal_blocks} of your past FTP blocks (response ratio ${p.personal_ratio}).`);
+  else notes.push(`Population estimate only (${p.personal_blocks} usable past FTP blocks; 2 needed to personalise).`);
+  body.innerHTML = `
+    <div style="font-size:20px;font-weight:700;color:var(--text);">${headline}</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:4px;">If you follow this plan. ${inputs}</div>
+    <details style="margin-top:8px;font-size:11px;color:var(--text2);">
+      <summary style="cursor:pointer;">Why this number</summary>
+      <div style="margin-top:6px;">Expected change ${g.conservative}% / ${g.central}% / ${g.optimistic}% (low / central / high), from trial results by training level, scaled by plan length, hard sessions per week and planned load vs your CTL. Changes under 3% are within FTP test noise. ${notes.map(esc).join(' ')}</div>
+      <div style="font-size:10px;color:var(--text3);margin-top:6px;">Sources: ${(p.model_citations || []).map(esc).join(' · ')}</div>
+    </details>`;
 }
 
 function renderCapabilityWidget(p) {
