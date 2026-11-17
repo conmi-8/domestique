@@ -1,6 +1,6 @@
 """Serving a .zwo: the capacity cap, the outdoor wrapper, the response.
 
-Five helpers shared by the six download endpoints and by both FIT builders.
+Six helpers shared by the six download endpoints and by both FIT builders.
 They are here rather than in the endpoints because `_cap_zwo_bytes` is the one
 place the capacity ceiling is applied -- the .zwo the athlete downloads and the
 .fit pushed to the head unit must be capped identically or the two disagree
@@ -72,6 +72,22 @@ def _wrap_zwo_outdoor(xml_text: str, transit_min: int, spin_min: int) -> str:
             f'  <!-- G1 spin home (off-plan) -->\n    </workout>', 1)
     return out
 
+def _export_zwo_body(path, filename: str, cap_active: bool = False):
+    """The bytes a .zwo download serves when they differ from the file on
+    disk, else None (serve the file as is). Applies the capacity cap (when
+    ``cap_active``) and then the profile's warm-up trim (time-crunched C3).
+    Any hiccup → None: never corrupt a download."""
+    from profile_manager import ProfileManager
+    import warmup_trim
+    try:
+        pm = ProfileManager.get()
+        raw = path.read_bytes()
+        body = _cap_zwo_bytes(raw, filename, pm) if cap_active else raw
+        body, _ = warmup_trim.trim_for_export(body, filename, pm)
+        return body if body is not raw and body != raw else None
+    except Exception:
+        return None
+
 def _zwo_download_response(path, filename: str, outdoor: int,
                           transit_min: int, spin_min: int,
                           cap_active: bool = False):
@@ -84,15 +100,7 @@ def _zwo_download_response(path, filename: str, outdoor: int,
     plain = FileResponse(
         path, filename=filename, media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-    capped_bytes = None
-    if cap_active:
-        from profile_manager import ProfileManager
-        try:
-            raw = path.read_bytes()
-            capped = _cap_zwo_bytes(raw, filename, ProfileManager.get())
-            capped_bytes = capped if capped is not raw and capped != raw else None
-        except Exception:
-            capped_bytes = None
+    capped_bytes = _export_zwo_body(path, filename, cap_active)
     if not outdoor:
         if capped_bytes is None:
             return plain  # byte-identical to the file on disk

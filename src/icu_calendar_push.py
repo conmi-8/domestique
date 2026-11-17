@@ -243,7 +243,8 @@ def _fit_last_step_is_open(fit_bytes: bytes) -> bool:
 
 
 def _build_event(s: dict, ext_id: str, pm, classifications: dict,
-                 workout_dir: Path, hr_mode: bool, lthr_ok: bool):
+                 workout_dir: Path, hr_mode: bool, lthr_ok: bool,
+                 warmup_max=None):
     """calendar-push (2026-07-07): build ONE ICU bulk-event dict for a session.
 
     Extracted VERBATIM from the _desired_events per-session body so the plan
@@ -261,8 +262,13 @@ def _build_event(s: dict, ext_id: str, pm, classifications: dict,
     bytes verbatim (ICU forwards ZWO to Garmin natively); an hr profile ships
     the transcoded HR-target FIT. ``ext_id`` is passed IN (the caller owns the
     day-relative <n> for planner events / the manual uuid for library pushes).
+
+    Warm-up trim (time-crunched C3): ``warmup_max`` (a per-Send value) or the
+    profile's Max warm-up shortens the attached workout, and the event name's
+    total minutes follow it. Off / no-op → bytes and name as before.
     """
     import app as _app
+    import warmup_trim as _wt
 
     # by_day is keyed on s["day"], so s.get("day") IS this session's day_iso —
     # deriving it here (vs threading day_iso through) keeps the byte-identical
@@ -275,6 +281,7 @@ def _build_event(s: dict, ext_id: str, pm, classifications: dict,
     if not zwo_path or not zwo_path.exists():
         return None, "file_missing"
     name = _display_name(s, classifications)
+    session_type = s.get("session_type") or ""
     if hr_mode:
         if not lthr_ok:
             # Guard BEFORE building: view='hr' silently degrades to a power FIT
@@ -282,9 +289,11 @@ def _build_event(s: dict, ext_id: str, pm, classifications: dict,
             return None, "needs_lthr"
         try:
             fit_bytes = _app.build_fit_workout_bytes(
-                s.get("session_type") or "z2",
+                session_type or "z2",
                 int(s.get("duration_min") or 60),
-                name, zwo_file, view="hr")
+                name, zwo_file, view="hr", warmup_max=warmup_max)
+            _, trim = _wt.trim_for_export(
+                zwo_path.read_bytes(), zwo_file, pm, warmup_max, session_type)
         except Exception as e:
             _log.warning("icu push: FIT build failed for %s: %s", zwo_file, e)
             return None, "build_failed"
@@ -303,9 +312,13 @@ def _build_event(s: dict, ext_id: str, pm, classifications: dict,
             if _app._capacity_cap_active(pm):
                 contents = _app._cap_zwo_bytes(
                     contents, Path(zwo_file).name, pm)
+            contents, trim = _wt.trim_for_export(
+                contents, zwo_file, pm, warmup_max, session_type)
         except OSError:
             return None, "file_missing"
         filename = Path(zwo_file).name
+    if trim:
+        name = _wt.retitle(name, trim["orig_s"], trim["new_s"])
     return {
         "start_date_local": f"{day_iso}T00:00:00",
         "category": "WORKOUT",
@@ -331,7 +344,7 @@ def _sessions_by_day(plan: dict) -> dict[str, list[dict]]:
 
 
 def _desired_events(pm, plan: dict, today: date, horizon_days: int,
-                    profile_id: str):
+                    profile_id: str, warmup_max=None):
     """Collect the horizon's pushable sessions as ICU bulk-event payloads.
 
     Returns (events, skipped, broken_ids):
@@ -383,7 +396,8 @@ def _desired_events(pm, plan: dict, today: date, horizon_days: int,
             # into broken_ids and the sweep spares that slot's prior event.
             ext_id = f"{_ID_ROOT}{profile_id}:{day_iso}:{n}"
             event, reason = _build_event(
-                s, ext_id, pm, classifications, workout_dir, hr_mode, lthr_ok)
+                s, ext_id, pm, classifications, workout_dir, hr_mode, lthr_ok,
+                warmup_max=warmup_max)
             if event is None:
                 skipped.append({"day": day_iso, "reason": reason})
                 # 3.3.1 hotfix (B3a): broken_ids exists to spare a previously

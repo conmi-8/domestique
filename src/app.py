@@ -780,7 +780,9 @@ from download_lib import (  # noqa: F401
     _wrap_zwo_outdoor,
     _zwo_download_response,
     _cap_active_for_download,
+    _export_zwo_body,
 )
+import warmup_trim as _warmup_trim
 from search_lib import (  # noqa: F401
     _SEARCH_TRANSLIT,
     _SEARCH_SYNONYMS,
@@ -5976,18 +5978,13 @@ def download_workout_by_id(filename: str, cap: int = Query(0)):
         return JSONResponse({"error": "not found"}, 404)
     # v1.6.4: media_type "application/octet-stream" (was "application/xml")
     # so WKWebView always treats it as a download.
-    if _cap_active_for_download(cap):
-        from profile_manager import ProfileManager
-        try:
-            raw = path.read_bytes()
-            capped = _cap_zwo_bytes(raw, filename, ProfileManager.get())
-            if capped is not raw and capped != raw:
-                return Response(
-                    capped, media_type="application/octet-stream",
-                    headers={"Content-Disposition":
-                             f'attachment; filename="{filename}"'})
-        except Exception:
-            pass
+    # The capacity cap and the warm-up trim; None = the file as on disk.
+    body = _export_zwo_body(path, filename, _cap_active_for_download(cap))
+    if body is not None:
+        return Response(
+            body, media_type="application/octet-stream",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{filename}"'})
     return FileResponse(
         path,
         filename=filename,
@@ -8188,6 +8185,12 @@ def api_calendar_push_workout(body: "dict | None" = None):
             return {"error": "bad_source"}
         if not zwo_file:
             return {"error": "no_workout_file"}
+        # Warm-up minutes for THIS send (time-crunched C2): blank/absent = the
+        # profile's Max warm-up setting.
+        try:
+            warmup_max = _warmup_trim.parse_max(body.get("warmup_max_min"))
+        except (ValueError, TypeError):
+            return {"error": "bad_warmup"}
 
         # Guard chain, mirroring reconcile (icu_calendar_push.py active-profile →
         # _connection → write_ok). Order matters: an apikey with no athlete_id is
@@ -8262,7 +8265,7 @@ def api_calendar_push_workout(body: "dict | None" = None):
                      "zwo_name": str(body.get("name") or "")}
             event, reason = _icp._build_event(
                 synth, ext_id, pm, classifications, workout_dir,
-                hr_mode, lthr_ok)
+                hr_mode, lthr_ok, warmup_max=warmup_max)
             if event is None:
                 return {"error": reason}
             return _send([event])
@@ -8283,7 +8286,7 @@ def api_calendar_push_workout(body: "dict | None" = None):
             # selected event is byte-identical to what auto-sync would push.
             horizon = max(_icp.HORIZON_DAYS, (target - today).days)
             desired, skipped, _ = _icp._desired_events(
-                pm, plan, today, horizon, profile_id)
+                pm, plan, today, horizon, profile_id, warmup_max=warmup_max)
             # Match on (day, filename): filename is the ZWO name (power) or
             # stem+".fit" (hr) that _build_event emits. Same-zwo-twice-on-a-day →
             # identical events → the first is correct (harmless).
@@ -8683,6 +8686,8 @@ def api_settings():
         # The planner's manual switch after a break: the ACWR ceiling is
         # lifted for weeks starting on or before this date (None: off).
         "acwr_cap_off_until": pm.acwr_cap_off_until,
+        # Max warm-up minutes for sent/exported workouts (None: off).
+        "warmup_max_min": _warmup_trim.setting(pm),
     }
 
 
@@ -8850,6 +8855,14 @@ def update_settings(request_body: dict):
             if until < clock.today():
                 raise HTTPException(400, "acwr_cap_off_until is in the past")
             athlete_updates["acwr_cap_off_until"] = until.isoformat()
+
+    # Max warm-up for sent/exported workouts: blank/None = off, else 0..20.
+    if "warmup_max_min" in request_body:
+        try:
+            athlete_updates["warmup_max_min"] = _warmup_trim.parse_max(
+                request_body["warmup_max_min"])
+        except (ValueError, TypeError):
+            raise HTTPException(400, "warmup_max_min must be blank or a whole number 0-20")
 
     # E2 detect: did the FTP change to exactly-match the currently-cached
     # eFTP? If so this is almost certainly an "Accept eFTP" action.
@@ -13075,7 +13088,8 @@ async def api_plan_update(debounce: int = Query(0)):
 
 def build_fit_workout_bytes(session_type: str, duration_min: int,
                             name: str, zwo_file: str | None = None,
-                            view: str | None = None, cap: int = 0) -> bytes:
+                            view: str | None = None, cap: int = 0,
+                            warmup_max: int | None = None) -> bytes:
     """Generate FIT workout bytes. Shared by ``/api/export/fit-workout`` AND
     ``launcher.JsApi.save_fit`` (issue #5) so the desktop native-save path can
     produce the bytes IN-PROCESS, with no WKWebView ``fetch()`` that can resolve
@@ -13120,6 +13134,20 @@ def build_fit_workout_bytes(session_type: str, duration_min: int,
                 capped = _cap_zwo_bytes(zwo_path.read_bytes(),
                                         Path(zwo_file).name, _pmc)
                 cap_text = capped.decode("utf-8", "replace")
+        # Warm-up trim (time-crunched C3): ``warmup_max`` (per-Send) or the
+        # profile's Max warm-up; the FIT's name follows the trimmed total.
+        try:
+            from profile_manager import ProfileManager
+            _src = (cap_text.encode("utf-8") if cap_text is not None
+                    else zwo_path.read_bytes())
+            _trimmed, _trim = _warmup_trim.trim_for_export(
+                _src, zwo_file, ProfileManager.get(), warmup_max,
+                session_type or "")
+        except Exception:
+            _trim = None
+        if _trim:
+            cap_text = _trimmed.decode("utf-8")
+            name = _warmup_trim.retitle(name, _trim["orig_s"], _trim["new_s"])
         fit_data = _build_fit_workout_from_zwo(
             name, zwo_path, ftp, hr_force=hr_force, zwo_text=cap_text)
     else:

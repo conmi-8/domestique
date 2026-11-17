@@ -715,7 +715,9 @@ class JsApi:
             import app
             p = app._workout_file(filename)
             if p and p.exists():
-                return p.read_bytes()
+                # same body the download endpoint serves (cap + warm-up trim)
+                body = app._export_zwo_body(p, p.name)
+                return body if body is not None else p.read_bytes()
         except Exception as e:
             log = _log()
             if log is not None:

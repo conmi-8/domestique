@@ -2160,7 +2160,7 @@ window.addEventListener('unhandledrejection', function(e) {
        level next to the modal overlay (see calpush-info). -->
   <div class="info-popover" id="planpop-update"><strong>Update plan</strong> automatically picks the right adjustment: a structure-preserving <em>rebalance</em> to today's TSB (fatigue), ACWR (load ratio) and availability when you're on track, or a full <em>rebuild with a recovery ramp</em> when you've missed enough to fall behind (Gabbett-safe, never a catch-up spike). Runs automatically after each ride sync too. Won't re-roll past or completed sessions, and won't move a fixed event date.</div>
   <div class="info-popover" id="planpop-availability"><strong>Edit availability</strong> sets per-day training time. Click a date to set hours; right-click to mark unavailable (holiday/injury). <strong>Press the pulsing UPDATE button to apply changes — the plan reflows on click.</strong></div>
-  <div class="info-popover" id="planpop-mode"><strong>Plan style</strong> — how your weekly sessions are chosen.<br><br><strong>Automatic (varied)</strong>: a varied, auto-adapting plan drawn from the full library — different sessions week to week.<br><strong>Fixed-core (repeatable)</strong>: the same weekly shape — one hard session type per phase that progresses by reps, over a Z2 base that scales to your available time.<br><strong>Template</strong>: a ready-made fixed-core blueprint.</div>
+  <div class="info-popover" id="planpop-mode"><strong>Plan style</strong> — how your weekly sessions are chosen.<br><br><strong>Automatic (varied)</strong>: a varied, auto-adapting plan drawn from the full library — different sessions week to week.<br><strong>Fixed-core (repeatable)</strong>: the same weekly shape — one hard session type per phase that progresses by reps, over a Z2 base that scales to your available time.<br><strong>Template</strong>: a ready-made fixed-core blueprint.<br><strong>Time-crunched (short &amp; hard)</strong>: for few hours — every ride is Z3 or harder (two VO2max days a week), rest days instead of easy rides, no recovery weeks.</div>
 
   <!-- v1.8.25 — "catching up your plan" overlay: greyed backdrop + stepped
        checklist shown on Plan-tab open while runPlanOpenSequence() runs. Click
@@ -2304,6 +2304,7 @@ window.addEventListener('unhandledrejection', function(e) {
             <option value="auto" selected>Automatic (varied)</option>
             <option value="fixed_core">Fixed-core (repeatable)</option>
             <option value="template">Template (preset)</option>
+            <option value="time_crunched">Time-crunched (short &amp; hard)</option>
           </select>
         </div>
         <div class="form-group" id="plan-template-group" style="display:none;"><label>Template</label>
@@ -3245,6 +3246,17 @@ window.addEventListener('unhandledrejection', function(e) {
           <div style="font-size:11px;color:var(--text3);margin-top:4px;">Empty = off. After saving you can rebuild the plan right away.</div>
         </div>
       </div>
+      <!-- Warm-up trim: shortens the warm-up of every workout sent to
+           intervals.icu (also plan sync) or exported as .zwo / FIT. -->
+      <div class="form-row">
+        <div class="form-group">
+          <label for="set-warmup-max">Max warm-up (min)
+            <span class="hint" title="Workouts you send to intervals.icu (including the plan sync) or download as .zwo / FIT get their warm-up shortened to this many minutes: one ramp from its first to its last power. The rest of the workout is unchanged, and FTP / ramp tests keep their full warm-up. Empty = off (full warm-up); 0 removes it. Your library files are never changed." style="margin-left:4px;cursor:help;color:var(--text3);border:1px solid var(--border);border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;">?</span>
+          </label>
+          <input type="number" id="set-warmup-max" min="0" max="20" step="1" placeholder="full" style="width:90px;">
+          <div style="font-size:11px;color:var(--text3);margin-top:4px;">Empty = full warm-up. 0–20. The Send button can override it for one workout.</div>
+        </div>
+      </div>
       <!-- W1: HR workout-target rows (visible in hr mode). These are the
            PRESCRIPTION rows the charts/FIT/chips use — distinct from the Friel
            analysis zones below. Server-validated; Reset restores Coggan. -->
@@ -3755,7 +3767,7 @@ loadProfileBadge();
 // Pre-load FTP for workout library mini SVGs (don't wait for Settings tab).
 // _targetMode too — red-team F6: it was only set on the Settings tab, so every
 // hr-mode surface outside Settings saw `undefined` until that tab was visited.
-getResource('/api/settings').then(r=>r.json()).then(d=>{window._athleteFtp=d.ftp||250;window._athleteLthr=d.lthr||170;window._athleteMaxHr=d.max_hr||195;window._targetMode=d.target_mode||'power';window._lthrIsSet=!!d.lthr_is_set;window._hrRows=d.hr_rows||null;}).catch(()=>{});
+getResource('/api/settings').then(r=>r.json()).then(d=>{window._athleteFtp=d.ftp||250;window._athleteLthr=d.lthr||170;window._athleteMaxHr=d.max_hr||195;window._targetMode=d.target_mode||'power';window._lthrIsSet=!!d.lthr_is_set;window._hrRows=d.hr_rows||null;window._warmupMax=(d.warmup_max_min!=null)?d.warmup_max_min:null;}).catch(()=>{});
 
 // AC2d — active profile id (server-rendered). Per-profile localStorage keys
 // (volume unit, DFA throttles) append ':<profile_id>' so profiles don't share
@@ -3959,16 +3971,31 @@ function _calDateBounds() {
   return {today: _calLocalIso(today), tomorrow: _calLocalIso(tmr),
           plus365: _calLocalIso(p365)};
 }
-async function _pushWorkoutToCalendar(source, zwoFile, dateIso, name) {
+// Warm-up minutes next to a Send button: prefilled from Settings → Max
+// warm-up; blank = the server uses that setting (full warm-up when unset).
+function _calWarmupInput(id) {
+  const v = (window._warmupMax != null) ? String(window._warmupMax) : '';
+  return `<label for="${esc(id)}" style="font-size:12px;color:var(--text2);" title="Warm-up length for this send: one ramp of this many minutes. Empty = full warm-up / your Settings value. FTP tests keep theirs.">Warm-up (min):</label>`
+    + `<input type="number" id="${esc(id)}" min="0" max="20" step="1" value="${esc(v)}" placeholder="full" style="width:60px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:13px;">`;
+}
+function _calWarmupValue(id) {
+  const inp = document.getElementById(id);
+  const v = inp ? String(inp.value).trim() : '';
+  return v === '' ? null : Number(v);
+}
+async function _pushWorkoutToCalendar(source, zwoFile, dateIso, name, warmupMin) {
   let r;
   try {
     const res = await fetch('/api/calendar/push-workout', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source, zwo_file: zwoFile, date: dateIso,
-                            name: name || ''})});
+                            name: name || '',
+                            warmup_max_min: (warmupMin == null) ? null : warmupMin})});
     r = await res.json();
   } catch (e) { r = {error: 'network'}; }
-  if (r && r.ok && r.kept_on) {
+  if (r && r.error === 'bad_warmup') {
+    showToast('Warm-up must be a whole number of minutes from 0 to 20 (or empty)', 5000, 'warning');
+  } else if (r && r.ok && r.kept_on) {
     // #28: the rider moved this workout in intervals.icu; it stays there.
     showToast(`Already on your intervals.icu calendar for ${r.kept_on} — left where you put it`, 6000, 'success');
   } else if (r && r.ok) {
@@ -3998,14 +4025,16 @@ async function calPushLibConfirm(zwoFile, name) {
   if (!dateIso) { showToast('Pick a date first', 3000, 'warning'); return; }
   const btn = document.getElementById('calpush-lib-confirm');
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
-  await _pushWorkoutToCalendar('library', zwoFile, dateIso, name);
+  await _pushWorkoutToCalendar('library', zwoFile, dateIso, name,
+                               _calWarmupValue('calpush-lib-warmup'));
   if (btn) { btn.disabled = false; btn.textContent = 'Confirm'; }
 }
 // Planner modal: no picker — the session already carries its date.
 async function calPushPlanner(zwoFile, dateIso, name, btn) {
   if (btn) { btn.dataset._label = btn.textContent; btn.disabled = true;
              btn.textContent = 'Sending…'; }
-  await _pushWorkoutToCalendar('planner', zwoFile, dateIso, name);
+  await _pushWorkoutToCalendar('planner', zwoFile, dateIso, name,
+                               _calWarmupValue('calpush-plan-warmup'));
   if (btn) { btn.disabled = false;
              btn.textContent = btn.dataset._label || '📅 Send to intervals.icu calendar'; }
 }
@@ -4528,6 +4557,7 @@ async function openWorkoutDetail(category, filename, meta, view) {
       <div id="calpush-lib-row" style="display:none;margin-top:10px;align-items:center;gap:8px;flex-wrap:wrap;">
         <label for="calpush-lib-date" style="font-size:12px;color:var(--text2);">Calendar date:</label>
         <input type="date" id="calpush-lib-date" value="${_calBounds.tomorrow}" min="${_calBounds.today}" max="${_calBounds.plus365}" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px;">
+        ${_calWarmupInput('calpush-lib-warmup')}
         <button class="btn btn-primary btn-sm" id="calpush-lib-confirm" onclick="calPushLibConfirm('${escJs(filename)}','${escJs(d.display_name || d.name || 'Workout')}')">Confirm</button>
       </div>
       <div style="margin-top:8px;font-size:11px;color:var(--text3);">${hrCtx
@@ -15635,7 +15665,7 @@ function populatePlanFormFromGoal(goal) {
   // One-line active-config summary so the rider sees what the plan actually uses.
   const cfgEl = $('plan-active-config');
   if (cfgEl) {
-    const modeLbl = { auto: 'Automatic', fixed_core: 'Fixed-core', template: 'Template' }[goal.plan_mode || 'auto'] || 'Automatic';
+    const modeLbl = { auto: 'Automatic', fixed_core: 'Fixed-core', template: 'Template', time_crunched: 'Time-crunched' }[goal.plan_mode || 'auto'] || 'Automatic';
     const distLbl = { polarized: 'Polarized', pyramidal: 'Pyramidal', threshold: 'Threshold' }[goal.distribution || 'polarized'] || 'Polarized';
     const parts = [distLbl, modeLbl];
     if (goal.hours_per_week) parts.push(goal.hours_per_week + 'h/wk');
@@ -16333,6 +16363,10 @@ async function loadSettings() {
     aoIn.value = window._acwrOffUntil;
     aoIn.min = new Date().toLocaleDateString('en-CA');
   }
+  // Max warm-up (min) for sent/exported workouts (null = off).
+  window._warmupMax = (d.warmup_max_min != null) ? d.warmup_max_min : null;
+  const wmIn = $('set-warmup-max');
+  if (wmIn) wmIn.value = window._warmupMax != null ? String(window._warmupMax) : '';
   // v4.1.0 U3: render FTP source badge
   renderFtpSourceBadge(d.ftp_source, d.ftp_source_date);
   // v4.1.0 U2: fetch + render FTP history chart (async, non-blocking).
@@ -16826,6 +16860,9 @@ async function saveSettings() {
   const aoIn2 = $('set-acwr-off');
   const acwrOffChanged = !!aoIn2 && aoIn2.value !== (window._acwrOffUntil || '');
   if (aoIn2) body.acwr_cap_off_until = aoIn2.value || null;
+  // Max warm-up: empty = off; the server validates 0..20.
+  const wmIn2 = $('set-warmup-max');
+  if (wmIn2) body.warmup_max_min = wmIn2.value === '' ? null : Number(wmIn2.value);
   // W1: include hr_rows_custom ONLY when the editor values differ from the
   // server-resolved rows (saving untouched defaults changes nothing — C1+).
   const hre2 = $('hr-rows-editor');
@@ -19323,7 +19360,7 @@ async function openDayWorkout(sessionIdx, day) {
   // matched ZWO (nothing to attach). name is display-only for the planner branch
   // (the endpoint rebuilds the title from the plan) — passed for symmetry.
   const _calBtn = session.zwo_file
-    ? `<button class="btn" onclick="calPushPlanner('${escJs(session.zwo_file)}','${escJs(session.day)}','${escJs(fitName)}', this)" title="Send this planned session to your intervals.icu calendar">📅 Send to intervals.icu calendar</button><span class="info-icon" data-popover="calpush-info" tabindex="0" role="button" aria-label="Why send to intervals.icu?" title="What sending to intervals.icu does">?</span>`
+    ? `<button class="btn" onclick="calPushPlanner('${escJs(session.zwo_file)}','${escJs(session.day)}','${escJs(fitName)}', this)" title="Send this planned session to your intervals.icu calendar">📅 Send to intervals.icu calendar</button><span class="info-icon" data-popover="calpush-info" tabindex="0" role="button" aria-label="Why send to intervals.icu?" title="What sending to intervals.icu does">?</span><span style="display:inline-flex;align-items:center;gap:4px;margin-left:6px;">${_calWarmupInput('calpush-plan-warmup')}</span>`
     : '';
   html += (_hrLead ? (_fitBtn + _zwoBtn) : (_zwoBtn + _fitBtn)) + _calBtn;
   html += '</div>';
