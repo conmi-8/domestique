@@ -3978,12 +3978,19 @@ function _calWarmupInput(id) {
   return `<label for="${esc(id)}" style="font-size:12px;color:var(--text2);" title="Warm-up length for this send: one ramp of this many minutes. Empty = full warm-up / your Settings value. FTP tests keep theirs.">Warm-up (min):</label>`
     + `<input type="number" id="${esc(id)}" min="0" max="20" step="1" value="${esc(v)}" placeholder="full" style="width:60px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:13px;">`;
 }
+// null = blank (use the setting); undefined = not a number (the browser
+// reports value '' for typed garbage, which must not silently mean "off").
 function _calWarmupValue(id) {
   const inp = document.getElementById(id);
+  if (inp && inp.validity && inp.validity.badInput) return undefined;
   const v = inp ? String(inp.value).trim() : '';
   return v === '' ? null : Number(v);
 }
 async function _pushWorkoutToCalendar(source, zwoFile, dateIso, name, warmupMin) {
+  if (warmupMin === undefined) {
+    showToast('Warm-up must be a whole number of minutes from 0 to 20 (or empty)', 5000, 'warning');
+    return {error: 'bad_warmup'};
+  }
   let r;
   try {
     const res = await fetch('/api/calendar/push-workout', {
@@ -10041,7 +10048,7 @@ async function downloadZwo(cat, file, cap = false) {
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = saveName;
+    a.download = _dispositionName(r, saveName);
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {
@@ -16862,6 +16869,10 @@ async function saveSettings() {
   if (aoIn2) body.acwr_cap_off_until = aoIn2.value || null;
   // Max warm-up: empty = off; the server validates 0..20.
   const wmIn2 = $('set-warmup-max');
+  if (wmIn2 && wmIn2.validity && wmIn2.validity.badInput) {
+    alert('Max warm-up must be a whole number of minutes from 0 to 20, or empty for the full warm-up.');
+    return;
+  }
   if (wmIn2) body.warmup_max_min = wmIn2.value === '' ? null : Number(wmIn2.value);
   // W1: include hr_rows_custom ONLY when the editor values differ from the
   // server-resolved rows (saving untouched defaults changes nothing — C1+).
@@ -20125,9 +20136,17 @@ function renderPowerBlocksSVG(blocks, ftp) {
 }
 
 async function downloadGeneratedZwo(type, durationMin, name) {
-  let ftp = 250;
-  try { const s = await (await getResource('/api/settings')).json(); ftp = s.ftp || 250; } catch(e) {}
-  const blocks = buildPowerBlocks(type, durationMin, ftp);
+  let ftp = 250, warmMax = null;
+  try {
+    const s = await (await getResource('/api/settings')).json(); ftp = s.ftp || 250;
+    if (s.warmup_max_min != null) warmMax = s.warmup_max_min;
+  } catch(e) {}
+  let blocks = buildPowerBlocks(type, durationMin, ftp);
+  // Settings -> Max warm-up applies to a generated workout too (never a test).
+  if (warmMax != null && type !== 'ftp_test') {
+    blocks = blocks.map(b => (b.name === 'Warmup' && b.min > warmMax) ? {...b, min: warmMax} : b)
+                   .filter(b => !(b.name === 'Warmup' && b.min <= 0));
+  }
   let xml = `<?xml version="1.0" encoding="utf-8"?>\n<workout_file>\n  <author>Domestique Library</author>\n  <name>${esc(name)}</name>\n  <sportType>bike</sportType>\n  <workout>\n`;
   for (const b of blocks) {
     if (b.pctLow !== b.pctHigh) {
@@ -20173,6 +20192,15 @@ async function downloadGeneratedZwo(type, durationMin, name) {
 // hand the payload to Python via window.pywebview.api which pops a real
 // native save dialog. In a regular browser there's no pywebview, so this
 // helper returns false and the caller falls back to the browser path.
+// The download's own name from Content-Disposition (a warm-up-trimmed .zwo
+// carries its new total minutes), else the caller's.
+function _dispositionName(r, fallback) {
+  try {
+    const m = /filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') || '');
+    if (m && m[1]) return m[1];
+  } catch(_) {}
+  return fallback;
+}
 async function _saveViaPywebview(kind, filename, fetchUrl, meta) {
   // meta carries what the Python side needs to REGENERATE the bytes in-process
   // if the fetch() below comes back empty (issue #5 — WKWebView occasionally
@@ -20193,7 +20221,7 @@ async function _saveViaPywebview(kind, filename, fetchUrl, meta) {
     }
     let res;
     if (kind === 'zwo') {
-      res = await window.pywebview.api.save_zwo(filename, await r.text(), meta.zwo_file || filename);
+      res = await window.pywebview.api.save_zwo(_dispositionName(r, filename), await r.text(), meta.zwo_file || filename);
     } else if (kind === 'crs') {
       res = await window.pywebview.api.save_crs(filename, await r.text(), meta.region || '');
     } else {
@@ -20269,7 +20297,7 @@ async function downloadZwoFile(filename) {
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = filename;
+    a.download = _dispositionName(r, filename);
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {

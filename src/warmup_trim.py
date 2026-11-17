@@ -10,10 +10,11 @@ Warm-up = the leading ``<Warmup>`` elements and any leading steps below 76 %
 FTP before the first step at or above 76 %. When it is longer than N minutes
 it becomes ONE ramp of N minutes from its first power to its last power (N = 0
 removes it). Everything after it is left byte-for-byte as it was. FTP / CP /
-ramp tests (content class or session type ``ftp_test``) are never trimmed:
-their warm-up is part of the protocol.
+ramp tests (session type, the file's ftp_test tag or its content class; the
+filename rule only as fallback) are never trimmed: their warm-up is part of
+the protocol.
 """
-import json
+import math
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -35,7 +36,7 @@ def parse_max(value):
     if isinstance(value, bool):
         raise ValueError("warm-up minutes must be a number")
     f = float(value)
-    if f != int(f) or not (0 <= f <= WARMUP_MAX_LIMIT):
+    if not math.isfinite(f) or f != int(f) or not (0 <= f <= WARMUP_MAX_LIMIT):
         raise ValueError(f"warm-up minutes must be a whole number 0-{WARMUP_MAX_LIMIT}")
     return int(f)
 
@@ -145,8 +146,14 @@ def trim_zwo_text(text: str, max_min):
         last = _ends(els[n - 1])[1]
         if first is None or last is None:
             return text, None
-        repl = (f'<Warmup Duration="{limit_s}" PowerLow="{first}" '
-                f'PowerHigh="{last}" />')
+        # A <Warmup> climbs; a warm-up that ends lower than it starts is
+        # written as a plain <Ramp> so no player reads it as low->high.
+        tag = "Ramp" if float(first) > float(last) else "Warmup"
+        cads = {el.get("Cadence") for el in els[:n]}
+        cad = (f' Cadence="{cads.pop()}"'
+               if len(cads) == 1 and None not in cads else "")
+        repl = (f'<{tag} Duration="{limit_s}" PowerLow="{first}" '
+                f'PowerHigh="{last}"{cad} />')
     a, b = steps[0][0], steps[n - 1][1]
     if limit_s == 0:
         # the next step moves up into the warm-up's place (and indentation)
@@ -162,41 +169,69 @@ def trim_zwo_text(text: str, max_min):
     return out, {"orig_s": orig_s, "new_s": new_s, "warmup_s": warm_s}
 
 
+def _minutes(seconds: float) -> int:
+    """Whole minutes, halves rounded UP like the library titles (54.5 -> 55;
+    Python's round() would give 54)."""
+    return int(math.floor(seconds / 60 + 0.5))
+
+
+def retitle_filename(filename: str, orig_s: float, new_s: float) -> str:
+    """The library filename's trailing total ("..._60min.zwo", "..._60min_v2.zwo")
+    with the trimmed total. Only that last token changes."""
+    old, new = _minutes(orig_s), _minutes(new_s)
+    if old == new or not filename:
+        return filename
+    return re.sub(rf"(?<![\d]){old}min(?=(_v\d+)?\.zwo$)", f"{new}min",
+                  filename, flags=re.I)
+
+
 def retitle(name: str, orig_s: float, new_s: float) -> str:
     """Swap the workout's total minutes in a title ("... (64min)",
     "Threshold 64min — ...") for the trimmed total. Other numbers untouched."""
-    old, new = round(orig_s / 60), round(new_s / 60)
-    if old == new or not name:
+    if not name:
         return name
-    return re.sub(rf"(?<!\d){old}(\s?min)\b", lambda m: f"{new}{m.group(1)}",
-                  name)
+    # Library titles round a half minute both ways (<name> "54min", display
+    # name "55min" for 54.5): match whichever the title uses, keep its rule.
+    for rnd in (_minutes, lambda sec: int(sec // 60)):
+        old, new = rnd(orig_s), rnd(new_s)
+        pat = rf"(?<!\d){old}(\s?min)\b"
+        if re.search(pat, name):
+            if old == new:
+                return name
+            return re.sub(pat, lambda m, new=new: f"{new}{m.group(1)}", name)
+    return name
 
 
-_cls_cache: dict = {}
-
-
-def _classification(filename: str) -> dict:
-    """The content-classification entry for a library file ({} if none)."""
-    try:
-        import app as _app
-        p = Path(_app.active_workout_dir()) / ".content_classification.json"
-        key = (str(p), p.stat().st_mtime)
-        if _cls_cache.get("key") != key:
-            d = json.loads(p.read_text(encoding="utf-8"))
-            d = d.get("classifications", d) if isinstance(d, dict) else {}
-            _cls_cache.clear()
-            _cls_cache.update(key=key, data=d if isinstance(d, dict) else {})
-        return _cls_cache["data"].get(Path(filename).name) or {}
-    except (OSError, ValueError, ImportError):
-        return {}
-
-
-def is_protocol_test(filename: str, session_type: str = "") -> bool:
-    """FTP / CP / ramp test: by session type or content class, never by name."""
+def is_protocol_test(filename: str, session_type: str = "",
+                     text: str = "") -> bool:
+    """FTP / CP / ramp test, never trimmed (C7). Content first: the session
+    type, the workout's own ``<tag name="ftp_test"/>``, the planner's content
+    class / tags for the file. The planner's filename rule is the fallback for
+    a file the classification does not know (extra folder, new file)."""
     if (session_type or "").lower() == "ftp_test":
         return True
-    e = _classification(filename or "")
-    return e.get("primary") == "ftp_test" or "ftp_test" in (e.get("tags") or [])
+    if text and re.search(r'<tag\s+name="ftp_test', text):
+        return True
+    name = Path(filename or "").name
+    if not name:
+        return False
+    try:
+        import training_planner as tp
+        if tp._content_class_for_zwo(name) == "ftp_test":
+            return True
+        ent = (tp._load_content_classifications() or {}).get(name) or {}
+        return "ftp_test" in (ent.get("tags") or [])
+    except Exception:
+        # ponytail: no planner -> trust only the name rather than trim a test
+        return name.lower().startswith("ftp_test_")
+
+
+def limit_for(pm, override=None, session_type: str = ""):
+    """The warm-up minutes for a workout with NO library file (a generated
+    block): the per-Send override, else the setting; None = leave it."""
+    if (session_type or "").lower() == "ftp_test":
+        return None
+    return override if override is not None else setting(pm)
 
 
 def trim_for_export(raw: bytes, filename: str, pm, override=None,
@@ -205,11 +240,13 @@ def trim_for_export(raw: bytes, filename: str, pm, override=None,
     send, and info as trim_zwo_text (None = ``raw`` returned untouched).
     ``override`` (a per-Send value, already validated) beats the setting."""
     limit = override if override is not None else setting(pm)
-    if limit is None or is_protocol_test(filename, session_type):
+    if limit is None:
         return raw, None
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
+        return raw, None
+    if is_protocol_test(filename, session_type, text):
         return raw, None
     out, info = trim_zwo_text(text, limit)
     if info is None:

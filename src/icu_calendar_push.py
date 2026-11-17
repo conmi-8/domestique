@@ -343,6 +343,45 @@ def _sessions_by_day(plan: dict) -> dict[str, list[dict]]:
     return by_day
 
 
+# A planner Send's warm-up minutes outlive that send (C2 amendment): kept per
+# profile in user_prefs.json as {"<day>:<n>": minutes} — the same <day>:<n> as
+# the session's external_id — and NOT in the plan (SESSION_FIELDS_LOCKED).
+_WARMUP_OVR_KEY = "warmup_overrides"
+
+
+def warmup_overrides(pm) -> dict:
+    """{"<day>:<n>": minutes} of planner Sends; {} when none / unreadable."""
+    import warmup_trim as _wt
+    try:
+        raw = pm.prefs.get(_WARMUP_OVR_KEY) or {}
+    except Exception:
+        return {}
+    out = {}
+    for k, v in (raw.items() if isinstance(raw, dict) else ()):
+        try:
+            m = _wt.parse_max(v)
+        except (ValueError, TypeError):
+            continue
+        if m is not None:
+            out[str(k)] = m
+    return out
+
+
+def remember_warmup_override(pm, slot: str, minutes) -> None:
+    """Store (minutes int) or clear (None) one slot's override; slots before
+    today are pruned on every write."""
+    cur = warmup_overrides(pm)
+    if minutes is None:
+        if slot not in cur:
+            return
+        cur.pop(slot)
+    else:
+        cur[slot] = int(minutes)
+    today = clock.today().isoformat()
+    cur = {k: v for k, v in cur.items() if k.split(":")[0] >= today}
+    pm.save_prefs({_WARMUP_OVR_KEY: cur})
+
+
 def _desired_events(pm, plan: dict, today: date, horizon_days: int,
                     profile_id: str, warmup_max=None):
     """Collect the horizon's pushable sessions as ICU bulk-event payloads.
@@ -371,6 +410,7 @@ def _desired_events(pm, plan: dict, today: date, horizon_days: int,
     classifications = _load_classifications(workout_dir)
 
     by_day = _sessions_by_day(plan)
+    overrides = warmup_overrides(pm)
 
     events, skipped, broken_ids = [], [], set()
     for day_iso in sorted(by_day):
@@ -397,7 +437,8 @@ def _desired_events(pm, plan: dict, today: date, horizon_days: int,
             ext_id = f"{_ID_ROOT}{profile_id}:{day_iso}:{n}"
             event, reason = _build_event(
                 s, ext_id, pm, classifications, workout_dir, hr_mode, lthr_ok,
-                warmup_max=warmup_max)
+                warmup_max=(warmup_max if warmup_max is not None
+                            else overrides.get(f"{day_iso}:{n}")))
             if event is None:
                 skipped.append({"day": day_iso, "reason": reason})
                 # 3.3.1 hotfix (B3a): broken_ids exists to spare a previously

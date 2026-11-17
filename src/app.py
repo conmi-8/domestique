@@ -5979,12 +5979,13 @@ def download_workout_by_id(filename: str, cap: int = Query(0)):
     # v1.6.4: media_type "application/octet-stream" (was "application/xml")
     # so WKWebView always treats it as a download.
     # The capacity cap and the warm-up trim; None = the file as on disk.
-    body = _export_zwo_body(path, filename, _cap_active_for_download(cap))
+    body, out_name = _export_zwo_body(path, filename,
+                                      _cap_active_for_download(cap))
     if body is not None:
         return Response(
             body, media_type="application/octet-stream",
             headers={"Content-Disposition":
-                     f'attachment; filename="{filename}"'})
+                     f'attachment; filename="{out_name}"'})
     return FileResponse(
         path,
         filename=filename,
@@ -8285,17 +8286,29 @@ def api_calendar_push_workout(body: "dict | None" = None):
             # is still buildable. _desired_events assigns the exact <n>, so the
             # selected event is byte-identical to what auto-sync would push.
             horizon = max(_icp.HORIZON_DAYS, (target - today).days)
-            desired, skipped, _ = _icp._desired_events(
-                pm, plan, today, horizon, profile_id, warmup_max=warmup_max)
             # Match on (day, filename): filename is the ZWO name (power) or
             # stem+".fit" (hr) that _build_event emits. Same-zwo-twice-on-a-day →
             # identical events → the first is correct (harmless).
             want = (Path(zwo_file).stem + ".fit") if hr_mode \
                 else Path(zwo_file).name
-            event = next(
-                (ev for ev in desired
-                 if ev["start_date_local"][:10] == date_iso
-                 and ev["filename"] == want), None)
+
+            def _pick():
+                desired, skipped, _ = _icp._desired_events(
+                    pm, plan, today, horizon, profile_id, warmup_max=warmup_max)
+                return next(
+                    (ev for ev in desired
+                     if ev["start_date_local"][:10] == date_iso
+                     and ev["filename"] == want), None), skipped
+            event, skipped = _pick()
+            # C2 amendment: this Send's warm-up stays with the session (the
+            # next auto-sync must not undo it). A blank Send clears it, so
+            # rebuild without the stored override.
+            slot = ":".join(event["external_id"].rsplit(":", 2)[-2:]) \
+                if event is not None else None
+            if (event is not None and warmup_max is None
+                    and slot in _icp.warmup_overrides(pm)):
+                _icp.remember_warmup_override(pm, slot, None)
+                event, skipped = _pick()
             if event is None:
                 # Defense (the frontend hides the button per O3): a slot with no
                 # ZWO / dismissed / skipped isn't pushable. Surface needs_lthr if
@@ -8319,7 +8332,10 @@ def api_calendar_push_workout(body: "dict | None" = None):
                 _log.info("EVENT=icu_calendar_push_workout source=planner "
                           "date=%s pushed=0 kept_on=%s", date_iso, kept_on)
                 return {"ok": True, "pushed": 0, "kept_on": kept_on}
-            return _send([event])
+            res = _send([event])
+            if res.get("ok") and warmup_max is not None:
+                _icp.remember_warmup_override(pm, slot, warmup_max)
+            return res
 
         return _icp._one_at_a_time(_icp._RECONCILE_LOCK_TIMEOUT_S, _push_planned)
     except Exception as e:                      # amendment 7: zero 500s, ever
@@ -13156,7 +13172,20 @@ def build_fit_workout_bytes(session_type: str, duration_min: int,
         warmup = min(10, duration_min // 8)
         cooldown = min(5, duration_min // 12)
         main_min = duration_min - warmup - cooldown
-        blocks.append({"name": "Warmup", "min": warmup, "pctLow": 45, "pctHigh": 65, "intensity": "warmup"})
+        # Max warm-up (C3) for a generated block too: shorter warm-up, same
+        # main set (main_min is fixed above), so the total drops with it.
+        try:
+            from profile_manager import ProfileManager
+            _lim = _warmup_trim.limit_for(ProfileManager.get(), warmup_max,
+                                          session_type)
+        except Exception:
+            _lim = None
+        if _lim is not None and _lim < warmup:
+            name = _warmup_trim.retitle(name, duration_min * 60,
+                                        (duration_min - warmup + _lim) * 60)
+            warmup = _lim
+        if warmup:  # Max warm-up 0 drops the step (a 0 s FIT step is invalid)
+            blocks.append({"name": "Warmup", "min": warmup, "pctLow": 45, "pctHigh": 65, "intensity": "warmup"})
         if st_norm == "vo2max":
             reps = min(5, max(3, main_min // 7))
             for i in range(reps):

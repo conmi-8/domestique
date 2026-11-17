@@ -73,20 +73,24 @@ def _wrap_zwo_outdoor(xml_text: str, transit_min: int, spin_min: int) -> str:
     return out
 
 def _export_zwo_body(path, filename: str, cap_active: bool = False):
-    """The bytes a .zwo download serves when they differ from the file on
-    disk, else None (serve the file as is). Applies the capacity cap (when
-    ``cap_active``) and then the profile's warm-up trim (time-crunched C3).
-    Any hiccup → None: never corrupt a download."""
+    """(body, filename) a .zwo download serves. body is None when it is the
+    file on disk (serve the file as is). Applies the capacity cap (when
+    ``cap_active``) and then the profile's warm-up trim (time-crunched C3);
+    a trimmed file's name carries the trimmed total minutes.
+    Any hiccup → (None, filename): never corrupt a download."""
     from profile_manager import ProfileManager
     import warmup_trim
     try:
         pm = ProfileManager.get()
         raw = path.read_bytes()
         body = _cap_zwo_bytes(raw, filename, pm) if cap_active else raw
-        body, _ = warmup_trim.trim_for_export(body, filename, pm)
-        return body if body is not raw and body != raw else None
+        body, trim = warmup_trim.trim_for_export(body, filename, pm)
+        if trim:
+            filename = warmup_trim.retitle_filename(
+                filename, trim["orig_s"], trim["new_s"])
+        return (body if body is not raw and body != raw else None), filename
     except Exception:
-        return None
+        return None, filename
 
 def _zwo_download_response(path, filename: str, outdoor: int,
                           transit_min: int, spin_min: int,
@@ -100,7 +104,7 @@ def _zwo_download_response(path, filename: str, outdoor: int,
     plain = FileResponse(
         path, filename=filename, media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-    capped_bytes = _export_zwo_body(path, filename, cap_active)
+    capped_bytes, filename = _export_zwo_body(path, filename, cap_active)
     if not outdoor:
         if capped_bytes is None:
             return plain  # byte-identical to the file on disk

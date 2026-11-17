@@ -512,3 +512,301 @@ class TestB8:
             except RuntimeError:
                 pass
         assert seen.get("plan_mode") == "time_crunched"
+
+
+# ===========================================================================
+# QA fix-forward (S1-S4, N1-N7) — repros from qa_warmup/qa_tests plus
+# tests that kill the mutation survivors.
+# ===========================================================================
+
+def _zwo(*steps, name="W (60min)"):
+    return ("<workout_file><name>%s</name><workout>\n        %s\n    </workout></workout_file>"
+            % (name, "\n        ".join(steps)))
+
+
+def _add_lib_file(stub, name):
+    (stub.workouts / name).write_bytes((LIB / name).read_bytes())
+    p = stub.workouts / ".content_classification.json"
+    cls = json.loads(p.read_text(encoding="utf-8"))
+    full = json.loads((LIB / ".content_classification.json")
+                      .read_text(encoding="utf-8"))["classifications"]
+    cls["classifications"][name] = full[name]
+    p.write_text(json.dumps(cls), encoding="utf-8")
+
+
+class TestS1HalfMinuteTitles:
+    HALF = "anaerobic_2x150s-10min_122pct_54min.zwo"   # 54.5 min, title 55min
+
+    def test_C9_half_minutes_round_up(self):
+        assert wt._minutes(54.5 * 60) == 55 and wt._minutes(47.5 * 60) == 48
+        assert wt.retitle("X 55min", 54.5 * 60, 47.5 * 60) == "X 48min"
+        out, info = wt.trim_zwo_text(_text(self.HALF), 5)
+        assert info["orig_s"] / 60 == 54.5
+        # <name> rounds that half down ("54min"); the trimmed one keeps the rule
+        assert "<name>Anaerobic (47min)</name>" in out
+
+    def test_C9_event_name_half_minute_title(self, stub, fake):
+        _add_lib_file(stub, self.HALF)
+        _set(stub, 5)
+        _push(stub, source="library", zwo_file=self.HALF, date=D1, name="x")
+        ev, _ = _sent(fake)
+        assert "48min" in ev["name"] and "55min" not in ev["name"], ev["name"]
+
+    def test_C9_no_stale_titles_in_library(self):
+        cls = json.loads((LIB / ".content_classification.json")
+                         .read_text(encoding="utf-8"))["classifications"]
+        stale = []
+        for f in sorted(LIB.glob("*.zwo")):
+            out, info = wt.trim_zwo_text(f.read_text(encoding="utf-8"), 5)
+            if not info:
+                continue
+            if wt._minutes(info["orig_s"]) == wt._minutes(info["new_s"]):
+                continue                     # total unchanged after rounding
+            old = f"{wt._minutes(info['orig_s'])}min"
+            dn = cls.get(f.name, {}).get("display_name") or ""
+            if re.search(rf"(?<!\d){old}\b", dn) and \
+                    re.search(rf"(?<!\d){old}\b",
+                              wt.retitle(dn, info["orig_s"], info["new_s"])):
+                stale.append(f.name)
+        assert stale == []
+
+    def test_C9_retitle_ignores_longer_numbers(self):
+        assert wt.retitle("Z 160min (60min)", 3600, 2400) == "Z 160min (40min)"
+
+
+class TestS2ProtocolDetection:
+    def test_C7_extra_folder_ftp_test(self, stub, tmp_path):
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        (extra / "ftp_test_my_ramp.zwo").write_bytes((LIB / RAMP_TEST).read_bytes())
+        _set(stub, 0)
+        with mock.patch.object(app_module, "EXTRA_WORKOUT_DIR", extra):
+            r = stub.client.get("/api/download/zwo/ftp_test_my_ramp.zwo")
+        assert r.status_code == 200
+        assert r.content == (LIB / RAMP_TEST).read_bytes()
+
+    def test_C7_missing_classification_file(self, stub):
+        (stub.workouts / ".content_classification.json").unlink()
+        _set(stub, 0)
+        r = stub.client.get(f"/api/download/zwo/{RAMP_TEST}")
+        assert r.content == stub.disk[RAMP_TEST]
+
+    def test_C7_file_tag_is_content(self):
+        src = _zwo('<Warmup Duration="1200" PowerLow="0.4" PowerHigh="0.7" />',
+                   '<SteadyState Duration="300" Power="1.0" />').replace(
+            "<workout>", '<tags><tag name="ftp_test"/></tags><workout>')
+        assert wt.is_protocol_test("my_custom.zwo", "", src)
+        pm = types.SimpleNamespace(_athlete={"warmup_max_min": 0})
+        raw = src.encode()
+        assert wt.trim_for_export(raw, "my_custom.zwo", pm)[0] is raw
+
+    @pytest.mark.parametrize("entry", [
+        {"primary": "ftp_test", "confidence": 1.0},
+        {"primary": "threshold", "confidence": 1.0, "tags": ["ftp_test"]}])
+    def test_C7_classification_primary_or_tag(self, entry):
+        with mock.patch.object(tp, "_load_content_classifications",
+                               return_value={"mine.zwo": entry}):
+            assert wt.is_protocol_test("mine.zwo")
+            assert wt.is_protocol_test("sub/mine.zwo")      # by basename
+        with mock.patch.object(tp, "_load_content_classifications",
+                               return_value={"mine.zwo": {"primary": "threshold"}}):
+            assert not wt.is_protocol_test("mine.zwo")
+
+
+class TestS3GeneratedWorkouts:
+    @staticmethod
+    def _fit_steps(stub, url):
+        from fit_tool.fit_file import FitFile
+        from fit_tool.profile.messages.workout_step_message import WorkoutStepMessage
+        r = stub.client.get(url)
+        assert r.status_code == 200, r.text
+        return [m for m in (x.message for x in FitFile.from_bytes(r.content).records)
+                if isinstance(m, WorkoutStepMessage)]
+
+    def test_C3_fileless_fit_honours_setting(self, stub):
+        url = "/api/export/fit-workout?session_type=threshold&duration_min=90&name=T"
+        a = self._fit_steps(stub, url)
+        _set(stub, 2)
+        b = self._fit_steps(stub, url)
+        assert float(a[0].duration_time) == 600 and float(b[0].duration_time) == 120
+        assert [float(s.duration_time) for s in a[1:]] == \
+            [float(s.duration_time) for s in b[1:]]
+        _set(stub, 0)
+        c = self._fit_steps(stub, url)
+        assert len(c) == len(a) - 1                       # warm-up step dropped
+
+    def test_C7_fileless_ftp_test_untouched(self, stub):
+        url = "/api/export/fit-workout?session_type=ftp_test&duration_min=60&name=T"
+        a = self._fit_steps(stub, url)
+        _set(stub, 0)
+        assert len(self._fit_steps(stub, url)) == len(a)
+
+    def test_C3_generated_zwo_in_dashboard(self):
+        html = DASH.read_text(encoding="utf-8")
+        fn = html[html.index("async function downloadGeneratedZwo"):]
+        fn = fn[:fn.index("async function _saveViaPywebview")]
+        assert "s.warmup_max_min" in fn and "type !== 'ftp_test'" in fn
+        assert "b.name === 'Warmup' && b.min > warmMax" in fn
+
+
+class TestS4PlannerOverridePersists:
+    def test_C2_planner_override_survives_autosync(self, stub, fake):
+        _set(stub, 10)
+        _write_plan([_sess(LEADING_SS)])
+        _push(stub, source="planner", zwo_file=LEADING_SS, date=D1, warmup_max_min=2)
+        ev1, body1 = _sent(fake)
+        assert _steps(body1)[0].startswith('<Warmup Duration="120"')
+        assert icp.warmup_overrides(stub.pm) == {f"{D1}:0": 2}
+        fake.events[0]["file_contents_base64"] = "changed"   # force an update
+        icp.reconcile()
+        ev2, body2 = _sent(fake)
+        assert ev2["external_id"] == ev1["external_id"]
+        assert _steps(body2)[0].startswith('<Warmup Duration="120"'), _steps(body2)[0]
+
+    def test_C2_planner_blank_send_clears_override(self, stub, fake):
+        _set(stub, 5)
+        _write_plan([_sess(LEADING_SS)])
+        _push(stub, source="planner", zwo_file=LEADING_SS, date=D1, warmup_max_min=2)
+        _push(stub, source="planner", zwo_file=LEADING_SS, date=D1, warmup_max_min="")
+        assert _steps(_sent(fake)[1])[0].startswith('<Warmup Duration="300"')
+        assert icp.warmup_overrides(stub.pm) == {}
+
+    def test_C2_library_send_stores_nothing(self, stub, fake):
+        _push(stub, source="library", zwo_file=WARMUP_EL, date=D1, name="x",
+              warmup_max_min=3)
+        assert icp.warmup_overrides(stub.pm) == {}
+
+    def test_C2_past_slots_pruned(self, stub):
+        old = (date.today() - timedelta(days=3)).isoformat()
+        stub.pm.save_prefs({"warmup_overrides": {f"{old}:0": 4}})
+        icp.remember_warmup_override(stub.pm, f"{D1}:1", 6)
+        assert icp.warmup_overrides(stub.pm) == {f"{D1}:1": 6}
+
+
+class TestN1NonFinite:
+    @pytest.mark.parametrize("v", ["nan", "inf", "-inf", "Infinity", [5], {"a": 1}])
+    def test_C1_non_finite_rejected(self, stub, v):
+        assert _set(stub, v).status_code == 400
+
+    def test_C1_huge_json_number(self, stub):
+        r = stub.client.post("/api/settings", content=b'{"warmup_max_min": 1e400}',
+                             headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize("v", ["inf", "nan", True])
+    def test_C2_non_finite_send(self, stub, fake, v):
+        assert _push(stub, source="library", zwo_file=WARMUP_EL, date=D1,
+                     name="x", warmup_max_min=v) == {"error": "bad_warmup"}
+
+
+class TestN2Survivors:
+    def test_C2_send_zero_beats_setting(self, stub, fake):
+        _set(stub, 10)
+        _push(stub, source="library", zwo_file=WARMUP_EL, date=D1, name="x",
+              warmup_max_min=0)
+        assert "<Warmup" not in _sent(fake)[1]
+
+    def test_C4_step_at_75pct_is_easy(self):
+        out, info = wt.trim_zwo_text(_zwo(
+            '<SteadyState Duration="600" Power="0.5" />',
+            '<SteadyState Duration="600" Power="0.75" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert info["warmup_s"] == 1200
+
+    def test_C4_step_at_76pct_ends_warmup(self):
+        out, info = wt.trim_zwo_text(_zwo(
+            '<SteadyState Duration="600" Power="0.5" />',
+            '<SteadyState Duration="600" Power="0.76" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert info["warmup_s"] == 600
+
+    def test_C4_only_76pct_step_counts_as_hard(self):
+        # the only >=76% step sits exactly at 0.76: it still ends the warm-up
+        out, info = wt.trim_zwo_text(_zwo(
+            '<SteadyState Duration="900" Power="0.5" />',
+            '<SteadyState Duration="600" Power="0.76" />'), 5)
+        assert info is not None and info["warmup_s"] == 900
+
+    def test_C4_intervals_first_and_last_power(self):
+        out, info = wt.trim_zwo_text(_zwo(
+            '<IntervalsT OnDuration="300" OffDuration="300" OnPower="0.6" OffPower="0.5" />',
+            '<IntervalsT Repeat="2" OnDuration="60" OffDuration="240" OnPower="0.7" OffPower="0.45" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert info["warmup_s"] == 600 + 600            # no Repeat = once
+        assert _steps(out)[0] == '<Ramp Duration="300" PowerLow="0.6" PowerHigh="0.45" />'
+
+    def test_C6_zero_exact_text(self):
+        src = _zwo('<Warmup Duration="600" PowerLow="0.4" PowerHigh="0.7" />',
+                   '<SteadyState Duration="600" Power="1.0" />', name="W (20min)")
+        out, _ = wt.trim_zwo_text(src, 0)
+        assert out == ("<workout_file><name>W (10min)</name><workout>\n"
+                       '        <SteadyState Duration="600" Power="1.0" />\n'
+                       "    </workout></workout_file>")
+
+    def test_C5_noop_returns_same_bytes_object(self):
+        pm = types.SimpleNamespace(_athlete={"warmup_max_min": 20})
+        raw = (LIB / LEADING_SS).read_bytes()             # 10-min warm-up
+        out, info = wt.trim_for_export(raw, LEADING_SS, pm)
+        assert info is None and out is raw
+
+
+class TestN3N4Shape:
+    def test_N3_descending_warmup_is_a_ramp(self):
+        out, _ = wt.trim_zwo_text(_zwo(
+            '<SteadyState Duration="600" Power="0.7" />',
+            '<SteadyState Duration="600" Power="0.5" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert _steps(out)[0] == '<Ramp Duration="300" PowerLow="0.7" PowerHigh="0.5" />'
+
+    def test_N4_shared_cadence_kept(self):
+        out, _ = wt.trim_zwo_text(_zwo(
+            '<Warmup Duration="600" PowerLow="0.4" PowerHigh="0.6" Cadence="90" />',
+            '<SteadyState Duration="600" Power="0.65" Cadence="90" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert _steps(out)[0] == \
+            '<Warmup Duration="300" PowerLow="0.4" PowerHigh="0.65" Cadence="90" />'
+        out2, _ = wt.trim_zwo_text(_zwo(
+            '<Warmup Duration="600" PowerLow="0.4" PowerHigh="0.6" Cadence="90" />',
+            '<SteadyState Duration="600" Power="0.65" />',
+            '<SteadyState Duration="600" Power="1.0" />'), 5)
+        assert "Cadence" not in _steps(out2)[0]
+
+
+class TestN5N7:
+    @pytest.mark.parametrize("url", [
+        f"/api/download/zwo/{WARMUP_EL}",
+        f"/api/download/zwo/anaerobic/{WARMUP_EL}",
+        f"/api/workout/download/{WARMUP_EL}"])
+    def test_N5_download_filename_carries_trimmed_minutes(self, stub, url):
+        assert WARMUP_EL in stub.client.get(url).headers["content-disposition"]
+        _set(stub, 5)
+        cd = stub.client.get(url).headers["content-disposition"]
+        assert 'filename="anaerobic_1x5min_125pct_40min.zwo"' in cd, cd
+
+    def test_N5_outdoor_name(self, stub):
+        _set(stub, 5)
+        r = stub.client.get(f"/api/download/zwo/anaerobic/{WARMUP_EL}?outdoor=1")
+        assert "anaerobic_1x5min_125pct_40min_outdoor.zwo" in r.headers["content-disposition"]
+        assert '<Warmup Duration="300" PowerLow="0.25" PowerHigh="0.5" />' in r.text
+
+    def test_N5_filename_rule(self):
+        assert wt.retitle_filename("a_1x60min_95pct_60min_v2.zwo", 3600, 2400) == \
+            "a_1x60min_95pct_40min_v2.zwo"
+
+    def test_N7_bad_input_is_an_error_not_off(self):
+        html = DASH.read_text(encoding="utf-8")
+        assert "inp.validity.badInput) return undefined" in html
+        assert "if (warmupMin === undefined)" in html
+        assert "wmIn2.validity && wmIn2.validity.badInput" in html
+        assert "_dispositionName(r, saveName)" in html
+
+
+def test_C2_fileless_fit_per_send_override(stub):
+    """A per-Send value reaches a generated (file-less) workout too."""
+    from fit_tool.fit_file import FitFile
+    from fit_tool.profile.messages.workout_step_message import WorkoutStepMessage
+    data = app_module.build_fit_workout_bytes("threshold", 90, "T", None,
+                                              view="power", warmup_max=3)
+    steps = [m for m in (x.message for x in FitFile.from_bytes(data).records)
+             if isinstance(m, WorkoutStepMessage)]
+    assert float(steps[0].duration_time) == 180
