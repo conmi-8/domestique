@@ -602,6 +602,20 @@ def is_already_running():
         return False
 
 
+def _window_title() -> str:
+    """"Domestique", plus branch@commit on a fork CI build, so the title bar and
+    taskbar say which build is running. An unstamped (upstream) build keeps the
+    plain title."""
+    try:
+        import channel_update
+        info = channel_update.build_info()
+    except Exception:
+        info = None
+    if not info:
+        return "Domestique"
+    return f"Domestique — {info['branch']}@{info['commit'][:7]}"
+
+
 def _activate_existing_window() -> bool:
     """Bring the existing Domestique native window to the foreground.
 
@@ -638,7 +652,7 @@ def _activate_existing_window() -> bool:
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            hwnd = user32.FindWindowW(None, "Domestique")
+            hwnd = user32.FindWindowW(None, _window_title())
             if hwnd:
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 user32.SetForegroundWindow(hwnd)
@@ -1112,7 +1126,7 @@ def main():
             except ValueError:
                 _scale = 1.0  # a junk value is Qt's to complain about, not ours
         webview.create_window(
-            "Domestique", URL,
+            _window_title(), URL,
             width=round(1400 / _scale), height=round(900 / _scale),
             min_size=(1000, 600),
             x=100, y=50,  # position near top-left, not bottom
