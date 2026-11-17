@@ -140,7 +140,7 @@ _STEP6 = "passes move weeks after the ramp has counted them (Step 6)"
     (36, 250),
     pytest.param(43, 300, marks=pytest.mark.xfail(strict=True, reason=_STEP6)),
     (55, 385),
-    pytest.param(70, 490, marks=pytest.mark.xfail(strict=True, reason=_STEP6)),
+    (70, 490),
     # the owner, carrying more than CTL x 7: week 6 reads 1.45x (Step 6).
     pytest.param(33, 256, marks=pytest.mark.xfail(strict=True, reason=_STEP6)),
 ])

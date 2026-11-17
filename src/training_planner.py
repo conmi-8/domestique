@@ -5816,8 +5816,11 @@ def _match_zwo_unclamped(
         if w["Name"] in used_names:
             score -= 15
 
-        # Deduplicate by name: keep only the highest-scoring variant
-        name = w["Name"]
+        # Deduplicate by FILE: keep only the highest-scoring copy. Not by
+        # name -- the long endurance files share theirs ("Endurance 240min --
+        # Z2" is six different rides), so a name key left one file per
+        # length and every long ride of a plan got that same file.
+        name = w.get("File") or w["Name"]
         if name in seen_names:
             if score > seen_names[name][0]:
                 seen_names[name] = (score, w)
