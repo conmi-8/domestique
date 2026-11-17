@@ -345,7 +345,12 @@ def test_browser_fallback_still_works_on_macos_and_windows(monkeypatch):
     """The other half of §7: the Linux guard must be an early return for Linux
     ONLY. macOS and Windows keep the degraded-but-usable browser path they
     ship with today."""
+    import ctypes
     import launcher
+
+    # The win32 path shows a modal MessageBoxW; a real one blocks the run.
+    if hasattr(ctypes, "windll"):
+        monkeypatch.setattr(ctypes.windll.user32, "MessageBoxW", lambda *a: 1)
 
     for plat in ("darwin", "win32"):
         opened: list = []
