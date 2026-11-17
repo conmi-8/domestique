@@ -1304,8 +1304,12 @@ def _next_week_cursor(cursor: date, phase=None) -> date:
 
 def _row_end(cursor: date, phase) -> date:
     """Last day of the week row starting at ``cursor``: the day before the
-    next row, or the phase's end when that comes first."""
-    return min(phase.end, _next_week_cursor(cursor, phase) - timedelta(days=1))
+    next row, or the phase's end when that comes first. A phase-like object
+    without an end (the sampler's direct callers pass just a name) gets the
+    whole row."""
+    nxt = _next_week_cursor(cursor, phase) - timedelta(days=1)
+    end = getattr(phase, "end", None)
+    return nxt if end is None else min(end, nxt)
 
 
 def _taper_anchor(target: date) -> date:
@@ -2765,6 +2769,8 @@ def fill_easy_volume(goal, weeks: list, library: list | None = None) -> None:
     hpw = float(getattr(goal, "hours_per_week", 0) or 0)
     used = {x.zwo_name for w in weeks for x in w.sessions
             if x is not None and getattr(x, "zwo_name", "")}
+    file_min = {r.get("File"): float(r.get("Duration(min)") or 0)
+                for r in (library or []) if r.get("File")}
     for w in weeks:
         budget = float(getattr(w, "tss_target", 0) or 0)
         if budget <= 0 or getattr(w, "phase", "") in UNLOAD_PHASES:
@@ -2811,6 +2817,17 @@ def fill_easy_volume(goal, weeks: list, library: list | None = None) -> None:
                 log.debug("fill rematch failed for %s", x.day, exc_info=True)
             if (x.duration_min or 0) > dur:      # the file never outgrows the day
                 x.duration_min, x.tss_estimate = dur, tss
+            # ...and the day never outgrows the file past the R4a band: the
+            # library's longest rides top out below a big weekend cap, and a
+            # card claiming minutes no file holds is the out-of-band slot the
+            # coherence pass can only narrate.
+            fd = file_min.get(x.zwo_file or "", 0.0)
+            if fd > 0 and x.duration_min - fd > _slot_file_band_min(x.duration_min):
+                keep = max(was[id(x)], min(x.duration_min,
+                                           int(fd + _slot_file_band_min(fd))))
+                x.tss_estimate = round((x.tss_estimate or 0) * keep / x.duration_min)
+                x.duration_min = keep
+                x.description = f"{x.session_type} ({x.duration_min}min)"
             if x.zwo_name:
                 used.add(x.zwo_name)
 
@@ -11178,6 +11195,8 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False,
                     continue
                 if getattr(s, "is_opener", False):
                     continue  # F2b: the race-week opener is deliberate
+                if getattr(s, "adapted", False):
+                    continue  # §6.12: a rebuild keeps the rider's adapted day
                 out.append((idx, s))
             out.sort(key=lambda kv: (
                 _order.index(kv[1].session_type)
@@ -11197,7 +11216,8 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False,
                    and (s.duration_min or 0) > _RIDE_FLOOR_MIN
                    and (_session_is_z5(s) if crunched else _session_is_hit(s))
                    and not _race_shape_frozen(s)
-                   and not getattr(s, "is_opener", False)]
+                   and not getattr(s, "is_opener", False)
+                   and not getattr(s, "adapted", False)]
             return sorted(out, key=lambda s: -(s.tss_estimate or 0))
 
         def _total(_wk=wk):

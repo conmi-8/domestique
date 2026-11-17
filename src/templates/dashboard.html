@@ -3987,6 +3987,9 @@ function _calWarmupValue(id) {
   return v === '' ? null : Number(v);
 }
 async function _pushWorkoutToCalendar(source, zwoFile, dateIso, name, warmupMin) {
+  // No warm-up argument at all = use the setting; only the explicit
+  // undefined from _calWarmupValue means an unreadable number.
+  if (arguments.length < 5) warmupMin = null;
   if (warmupMin === undefined) {
     showToast('Warm-up must be a whole number of minutes from 0 to 20 (or empty)', 5000, 'warning');
     return {error: 'bad_warmup'};
