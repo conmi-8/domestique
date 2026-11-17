@@ -11467,12 +11467,23 @@ def api_plan_ftp_projection():
         return {"available": False, "reason": "no_plan"}
 
     from profile_manager import ProfileManager
-    pm = ProfileManager.get()
-    ftp = pm._athlete.get("ftp")
-    weight = pm._athlete.get("weight_kg")
-    if not ftp:
+    try:
+        pm = ProfileManager.get()
+        athlete, sex = pm._athlete, pm.sex
+    except Exception as e:
+        _log.warning(f"ftp projection: profile unreadable ({e})")
+        return {"available": False, "reason": "profile_error"}
+
+    def _num(key):
+        try:
+            return float(athlete.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ftp, weight = _num("ftp"), _num("weight_kg")
+    if not ftp > 0:
         return {"available": False, "reason": "no_ftp"}
-    if not weight:
+    if not weight > 0:
         return {"available": False, "reason": "no_weight"}
 
     try:
@@ -11491,18 +11502,19 @@ def api_plan_ftp_projection():
             db.get_db(), (today - timedelta(days=days + 120)).isoformat(),
             today.isoformat())
         daily_tss = dict(loads)
-        ctl_by_day = {r["date"]: r["ctl"] for r in db.query_wellness(days)
-                      if r.get("ctl")}
-        if not ctl_by_day and loads:
-            # No intervals.icu CTL: the local EWMA, warmed up 120 days.
-            ewma = tau_fitting._ewma_series([v for _, v in loads], 42.0)
-            ctl_by_day = {d: c for (d, _), c in zip(loads, ewma)}
+        # Per day: intervals.icu CTL where wellness has it, else the local
+        # EWMA (warmed up 120 days). Wellness usually covers only the recent
+        # sync window, so older blocks run on the EWMA.
+        ewma = tau_fitting._ewma_series([v for _, v in loads], 42.0)
+        ctl_by_day = {d: c for (d, _), c in zip(loads, ewma)}
+        ctl_by_day.update({r["date"]: r["ctl"] for r in db.query_wellness(days)
+                           if r.get("ctl")})
     except Exception as e:
         _log.debug(f"ftp projection: history skipped ({e})")
 
     try:
         return ftp_projection.build_projection(
-            plan, float(ftp), float(weight), ctl, pm.sex, today,
+            plan, ftp, weight, ctl, sex, today,
             history=history, daily_tss=daily_tss, ctl_by_day=ctl_by_day)
     except Exception as e:
         _log.warning(f"ftp projection: malformed plan ({e})")

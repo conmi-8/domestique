@@ -356,7 +356,7 @@ FTP anchors roughly one boundary (~LT2). DFA adds the **aerobic-threshold (LT1 /
 - **Seiler et al. 2013** (PMID [21812820](https://pubmed.ncbi.nlm.nih.gov/21812820/)): 7 weeks, 2×/week. Compared 4×4, 4×8, 4×16. **4×8min @~106% FTP gave the largest overall gain in VO2peak, power at VO2peak and power at 4 mmol/L: 11.4% (95% CI 8.0–14.9)**, vs 5.6% (4×16), 5.5% (4×4) and 4.2% (low intensity only). (The per-outcome figures quoted here before, +16.2% threshold power for 4×8, +8% for 4×4 and +9% for 4×16, are not in the abstract and are unverified.) Recreational trained (VO2max ~52).
 
 ### Polarized > Threshold-Only for FTP
-- **Stöggl & Sperlich 2014** (PMC [3912323](https://pmc.ncbi.nlm.nih.gov/articles/PMC3912323/)): 9 weeks, 4-arm comparison. POL (68/6/26%): **+11.7% VO2peak, +8.1% power@4mmol, +5.1% peak power**. THR (46/54/0%): -0.6% VO2, +1.4% threshold (NS). **Threshold-only was the WORST of all 4 approaches.** Mechanism: raising the VO2max ceiling raises FTP.
+- **Stöggl & Sperlich 2014** (PMC [3912323](https://pmc.ncbi.nlm.nih.gov/articles/PMC3912323/)): 9 weeks, 4-arm comparison. POL (68/6/26%): **+11.7% VO2peak, +8.1% power@4mmol, +5.1% peak power**. THR (46/54/0%): no further effect (the abstract gives no figures; the -0.6% VO2 / +1.4% threshold quoted here before are unverified). **Threshold-only was the WORST of all 4 approaches.** Mechanism: raising the VO2max ceiling raises FTP.
 - **Neal et al. 2013** (PMID [23264537](https://pubmed.ncbi.nlm.nih.gov/23264537/)): 6 weeks. POL 80/0/20: **+8% peak power, +9% LT power**. THR 57/43/0: +3%, +2%. Polarized in LESS volume (6.4 vs 7.5 h/wk) produced greater gains.
 
 ### 2024 Meta-Analysis
@@ -413,7 +413,7 @@ POL group improved **BOTH** VO2peak +11.7% AND power@4mmol +8.1% simultaneously.
 POL (80/0/20) improved **BOTH** peak power +8% AND lactate threshold +9%. In LESS total volume than the threshold group.
 
 ### Rønnestad Block Periodization
-- **Rønnestad et al. 2012** (PMID [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/)): 12 weeks. Block (5 HIT every 4th week, 1 HIT other weeks) vs traditional (2 HIT/week). **Block: +8.8% VO2max, power at 2 mmol/L +22 ± 14%** vs traditional +3.7% and +10 ± 7% (the 2 mmol/L difference is a non-significant trend, P = 0.054). The 40-min TT figures quoted here before (+8.2% vs +4.1%) are not in the abstract and are unverified.
+- **Rønnestad et al. 2012** (PMID [23134196](https://pubmed.ncbi.nlm.nih.gov/23134196/); Scand J Med Sci Sports 2014;24(2):327-35, epub 2012): 12 weeks. Block (5 HIT every 4th week, 1 HIT other weeks) vs traditional (2 HIT/week). **Block: +8.8% VO2max, power at 2 mmol/L +22 ± 14%** vs traditional +3.7% and +10 ± 7% (the 2 mmol/L difference is a non-significant trend, P = 0.054). The 40-min TT figures quoted here before (+8.2% vs +4.1%) are not in the abstract and are unverified.
 - **Rønnestad et al. 2012b** (PMID [22646668](https://pubmed.ncbi.nlm.nih.gov/22646668/)): 4-week block. BP increased VO2max +4.6% while traditional showed no change.
 
 ### Pyramidal-to-Polarized Sequencing

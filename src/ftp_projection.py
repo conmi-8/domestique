@@ -175,15 +175,20 @@ def project_ftp(ftp: float, weight_kg: float, ctl: float | None,
     d_opt = duration_factor(weeks, DURATION_CAP_OPTIMISTIC_WEEKS)
     cons, central, opt = BASE_GAIN_PCT[tier]
     gains = [cons * d * mult, central * d * mult, opt * d_opt * mult]
-    if load_ratio is not None and load_ratio < LOAD_REDUCTION_R:
+    load_reduced = load_ratio is not None and load_ratio < LOAD_REDUCTION_R
+    if load_reduced:
+        # Amendment 8b: a plan this far below current load holds at best;
+        # the optimistic end keeps the 0.3-scaled gain.
         gains[0] = (-DETRAIN_PCT_PER_WEEK * min(weeks, DETRAIN_MAX_WEEKS)
                     * (LOAD_REDUCTION_R - load_ratio) / LOAD_REDUCTION_R)
+        gains[1] = 0.0
     return {
         "tier": tier,
         "tier_label": TIER_LABELS[tier],
         "gain_pct": {"conservative": gains[0], "central": gains[1],
                      "optimistic": gains[2]},
         "held_flat": weeks > DURATION_CAP_WEEKS,
+        "load_reduced": load_reduced,
     }
 
 
@@ -239,7 +244,7 @@ def plan_inputs(plan: dict, today: date) -> dict | None:
     if sweetspot_only:
         # Sub-threshold-only HIT is treated as one session a week (judgement;
         # Neal 2013 THR +2%, Stoggl 2014 THR ns).
-        hit_per_week = min(hit_per_week, 1.0)
+        hit_per_week = 1.0
     return {"weeks": w, "hit_per_week": hit_per_week,
             "weekly_tss": total_tss / w, "sweetspot_only": sweetspot_only}
 
@@ -258,7 +263,7 @@ def past_blocks(history: list[dict], daily_tss: dict, ctl_by_day: dict,
                 weight_kg: float, sex: str | None, today: date) -> list[dict]:
     """Qualifying past blocks: consecutive, non-overlapping pairs of FTP
     entries 6-16 weeks apart, tested_* or eftp_auto, within 3 years, with no
-    riding gap > 14 days. Each carries its response ratio rho and its noise
+    riding gap > 14 rest days. Each carries its response ratio rho and its noise
     sigma on the rho scale."""
     oldest = today - timedelta(days=HISTORY_MAX_DAYS)
     pts = []
@@ -288,7 +293,9 @@ def past_blocks(history: list[dict], daily_tss: dict, ctl_by_day: dict,
         ridden = [d0] + sorted(
             date.fromisoformat(k) for k, v in daily_tss.items()
             if v and d0.isoformat() <= k <= d1.isoformat()) + [d1]
-        if max((b - a).days for a, b in zip(ridden, ridden[1:])) > MAX_RIDING_GAP_DAYS:
+        # Rest days between two rides: one ride on day 0 and the next on day 15
+        # is a 14-day gap.
+        if max((b - a).days - 1 for a, b in zip(ridden, ridden[1:])) > MAX_RIDING_GAP_DAYS:
             continue
         ctl0 = _ctl_on(ctl_by_day, d0)
         tss = sum(float(v or 0) for k, v in daily_tss.items()
@@ -296,6 +303,8 @@ def past_blocks(history: list[dict], daily_tss: dict, ctl_by_day: dict,
         r = (tss / (days / 7.0)) / (ctl0 * 7) if ctl0 else None
         model = project_ftp(f0, weight_kg, ctl0, days / 7.0, RETRO_HIT_PER_WEEK, r, sex)
         central = model["gain_pct"]["central"]
+        if central <= 0:
+            continue  # a reduced-load block (8b) projects 0%: rho is undefined
         observed = (f1 / f0 - 1) * 100
         sd = CHANGE_SD_TESTED_PCT if (t0 and t1) else CHANGE_SD_EFTP_PCT
         blocks.append({"start": d0.isoformat(), "end": d1.isoformat(),
@@ -337,6 +346,7 @@ def build_projection(plan: dict, ftp: float, weight_kg: float,
                      daily_tss: dict | None = None,
                      ctl_by_day: dict | None = None) -> dict:
     """The endpoint payload. ``ctl`` None means unknown (planning fallback)."""
+    ctl = ctl or None  # CTL 0 says nothing about load: treat it as unknown
     inp = plan_inputs(plan, today)
     if inp is None:
         return {"available": False, "reason": "no_remaining_weeks"}
@@ -363,6 +373,7 @@ def build_projection(plan: dict, ftp: float, weight_kg: float,
         "watts": {k: _round5(ftp * (1 + v / 100)) for k, v in g.items()},
         "within_noise": g["central"] < WITHIN_NOISE_PCT,
         "held_flat": res["held_flat"],
+        "load_reduced": res["load_reduced"],
         "personalised": res["personalised"],
         "personal_blocks": res["personal_blocks"],
         "personal_ratio": res["personal_ratio"],

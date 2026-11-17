@@ -7,6 +7,7 @@ it covers.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -219,6 +220,96 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(fp.build_projection(_plan(20), 250, 75, 60, None, TODAY)["held_flat"])
         self.assertFalse(fp.build_projection(_plan(16), 250, 75, 60, None, TODAY)["held_flat"])
 
+    # ── Boundaries (wave 3 QA S1: each pins one contract constant) ──
+
+    def test_wkg_cutoffs_exact_contract_1(self):
+        """#1: each W/kg cut-off 2.5/3.2/4.0/4.8 is reached exactly, not 0.01 below (CTL unknown)."""
+        for tier, wkg in enumerate((2.5, 3.2, 4.0, 4.8), start=1):
+            self.assertEqual(fp.tier_for(wkg * 75, 75, None), tier, wkg)
+            self.assertEqual(fp.tier_for((wkg - 0.01) * 75, 75, None), tier - 1, wkg)
+
+    def test_female_shift_is_half_wkg_contract_1(self):
+        """#1: for F every W/kg cut-off moves down by exactly 0.5."""
+        for tier, wkg in enumerate((2.0, 2.7, 3.5, 4.3), start=1):
+            self.assertEqual(fp.tier_for((wkg + 0.02) * 80, 80, None, "F"), tier, wkg)
+            self.assertEqual(fp.tier_for((wkg - 0.02) * 80, 80, None, "F"), tier - 1, wkg)
+
+    def test_ctl_cutoffs_exact_contract_1(self):
+        """#1: each CTL cut-off 25/50/80/110 is reached exactly, not 1 below (W/kg tier 0)."""
+        for tier, ctl in enumerate((25, 50, 80, 110), start=1):
+            self.assertEqual(fp.tier_for(100, 75, ctl), tier, ctl)
+            self.assertEqual(fp.tier_for(100, 75, ctl - 1), tier - 1, ctl)
+
+    def test_optimistic_duration_cap_is_20_weeks_contract_3(self):
+        """#3: the optimistic value stops rising at 20 weeks; low/central at 16."""
+        d20 = (1 - math.exp(-20 / 8)) / (1 - math.exp(-10 / 8))
+        d16 = (1 - math.exp(-16 / 8)) / (1 - math.exp(-10 / 8))
+        for weeks in (20, 24):
+            g = _gain(weeks=weeks)                      # T2, 2 HIT, r = 1
+            self.assertAlmostEqual(g["optimistic"], 8 * d20, places=9)
+            self.assertAlmostEqual(g["central"], 5 * d16, places=9)
+
+    def test_load_band_edges_contract_7(self):
+        """#7: r = 0.7 and 0.9 open the next band; 1.15 still maintained."""
+        self.assertEqual(fp.load_multiplier(0.69, 1), 0.3)
+        self.assertEqual(fp.load_multiplier(0.7, 1), 0.7)
+        self.assertEqual(fp.load_multiplier(0.89, 2), 0.8)
+        self.assertEqual(fp.load_multiplier(0.9, 2), 1.0)
+        self.assertEqual(fp.load_multiplier(1.16, 1), 1.25)
+
+    def test_reduced_load_holds_at_best_contract_8b(self):
+        """#8b: r < 0.7 -> central 0%, low = detraining (#8), high = Base x D x M_hit x 0.3."""
+        g = _gain(weeks=10, load_ratio=0.35)            # T2
+        self.assertEqual(g["central"], 0.0)
+        self.assertAlmostEqual(g["conservative"], -2 * 5 * 0.5)
+        self.assertAlmostEqual(g["optimistic"], 8 * 1.0 * 1.0 * 0.3)
+        self.assertTrue(fp.project_ftp(250, 75, 60, 10, 2, 0.35)["load_reduced"])
+        self.assertFalse(fp.project_ftp(250, 75, 60, 10, 2, 0.7)["load_reduced"])
+        self.assertFalse(fp.project_ftp(250, 75, None, 10, 2, None)["load_reduced"])
+        plan = _plan(12)
+        for wk in plan["weeks"]:
+            for sess in wk["sessions"]:
+                sess["tss_estimate"] = 0
+        res = fp.build_projection(plan, 250, 75, 60, None, TODAY)
+        self.assertTrue(res["load_reduced"])
+        self.assertEqual(res["gain_pct"]["central"], 0.0)
+        self.assertEqual(res["watts"]["central"], 250)
+        self.assertLess(res["watts"]["conservative"], 250)
+
+    def test_within_noise_threshold_is_3_pct_contract_12(self):
+        """#12: central 2.99% is within noise, 3.00% is not."""
+        for central, want in ((2.99, True), (3.0, False)):
+            model = {"tier": 3, "tier_label": "well-trained", "held_flat": False,
+                     "load_reduced": False,
+                     "gain_pct": {"conservative": 1.0, "central": central, "optimistic": 6.0}}
+            with patch.object(fp, "project_ftp", return_value=model):
+                res = fp.build_projection(_plan(10), 330, 75, 67, None, TODAY)
+            self.assertIs(res["within_noise"], want, central)
+        # Unpatched: T3 at the 10-week reference is exactly 3% -> not within noise.
+        res = fp.build_projection(_plan(10), 330, 75, 470 / 7, None, TODAY)
+        self.assertEqual(res["gain_pct"]["central"], 3.0)
+        self.assertFalse(res["within_noise"])
+
+    def test_ctl_zero_is_unknown(self):
+        """QA N6: CTL 0 carries no load information -> flagged unknown, tier from W/kg."""
+        res = fp.build_projection(_plan(12), 250, 75, 0.0, None, TODAY)
+        self.assertTrue(res["ctl_unknown"])
+        self.assertIsNone(res["ctl"])
+        self.assertIsNone(res["load_ratio"])
+
+    def test_sweetspot_only_below_one_counts_as_one_contract_5(self):
+        """#5 (QA N2): sweet spot every other week still counts as 1/wk."""
+        plan = _plan(4)
+        for i, wk in enumerate(plan["weeks"]):
+            wk["sessions"] = [s for s in wk["sessions"]
+                              if s["session_type"] not in ("threshold", "vo2max")]
+            if i % 2 == 0:
+                wk["sessions"].append({"day": (TODAY + timedelta(weeks=i, days=1)).isoformat(),
+                                       "session_type": "sweetspot", "tss_estimate": 80})
+        inp = fp.plan_inputs(plan, TODAY)
+        self.assertTrue(inp["sweetspot_only"])
+        self.assertEqual(inp["hit_per_week"], 1.0)
+
 
 # ── Personal narrowing ─────────────────────────────────────────────────────
 
@@ -283,6 +374,46 @@ class PersonalTests(unittest.TestCase):
         self.assertAlmostEqual(b["sigma"], 2.8 / b["model_central_pct"])
         b = self._blocks(_hist(pts, "eftp_auto"))[0]
         self.assertAlmostEqual(b["sigma"], 4.0 / b["model_central_pct"])
+
+    def test_block_length_limits_exact_contract_14(self):
+        """#14: 42 and 112 days are blocks; 41 and 113 are not."""
+        d0 = self.d0
+        for days, n in ((41, 0), (42, 1), (112, 1), (113, 0)):
+            hist = _hist([(d0, 250), (d0 + timedelta(days=days), 262)])
+            self.assertEqual(len(self._blocks(hist)), n, days)
+
+    def test_history_horizon_exactly_3_years_contract_14(self):
+        """#14: a block starting exactly 3 x 365 days ago counts; one day older does not."""
+        daily = _riding(TODAY - timedelta(days=3 * 365 + 10), TODAY)
+        ctl = {k: 60.0 for k in daily}
+        for back, n in ((3 * 365, 1), (3 * 365 + 1, 0)):
+            start = TODAY - timedelta(days=back)
+            hist = _hist([(start, 250), (start + timedelta(weeks=8), 262)])
+            self.assertEqual(len(fp.past_blocks(hist, daily, ctl, 75, None, TODAY)), n, back)
+
+    def test_riding_gap_14_rest_days_allowed_contract_14(self):
+        """#14 (QA N1): 14 rest days in a row keep the block; 15 drop it."""
+        d0 = self.d0
+        pts = [(d0, 250), (d0 + timedelta(weeks=8), 262)]
+        for rest, n in ((14, 1), (15, 0)):
+            gap = {d0 + timedelta(days=20 + i) for i in range(rest)}
+            daily = _riding(d0 - timedelta(days=60), TODAY, skip=gap)
+            self.assertEqual(len(self._blocks(_hist(pts), daily)), n, rest)
+
+    def test_retrospective_model_assumes_two_hit_contract_15(self):
+        """#15: the past block is graded with 2 HIT/wk and its own load ratio
+        (60 TSS/day vs CTL 60 -> r = 1): T2, 8 weeks -> 5% x D(8)."""
+        d0 = self.d0
+        b = self._blocks(_hist([(d0, 250), (d0 + timedelta(weeks=8), 262)]))[0]
+        d8 = (1 - math.exp(-1)) / (1 - math.exp(-10 / 8))
+        self.assertAlmostEqual(b["model_central_pct"], 5 * d8, places=9)
+
+    def test_reduced_load_block_skipped_contract_15(self):
+        """#15 + #8b: a past block whose model central is 0% has no rho -> skipped, no crash."""
+        d0 = self.d0
+        light = _riding(d0 - timedelta(days=60), TODAY, tss=10.0)  # r ~ 0.17
+        pts = [(d0, 250), (d0 + timedelta(weeks=8), 262), (d0 + timedelta(weeks=16), 270)]
+        self.assertEqual(self._blocks(_hist(pts), light), [])
 
     def test_applied_with_two_blocks_clamped_and_floored_contract_16(self):
         """#16: >=2 blocks; rho clamped to [0.3, 1.7]; band never narrower than test noise."""
@@ -416,6 +547,40 @@ class EndpointTests(unittest.TestCase):
             d = self._get()
             self.assertFalse(d["available"], bad)
 
+    def test_bad_profile_never_500_contract_20(self):
+        """#20 (QA N3): an unreadable profile or a non-numeric FTP -> 200 available false."""
+        self._write(_plan(12))
+        self.assertEqual(self._get({"ftp": "abc", "weight_kg": 75})["reason"], "no_ftp")
+        self.assertEqual(self._get({"ftp": 250, "weight_kg": "x"})["reason"], "no_weight")
+        with patch.object(app_module, "_plan_dir", return_value=self._tmp), \
+             patch("profile_manager.ProfileManager.get", side_effect=RuntimeError("boom")):
+            res = TestClient(app_module.app).get("/api/plan/ftp-projection")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"available": False, "reason": "profile_error"})
+
+    def test_past_block_ctl_falls_back_per_day_contract_15(self):
+        """#15 (QA S2): history wiring through the endpoint. Wellness CTL covers only
+        the recent weeks; older days use the local EWMA, newer ones the wellness value."""
+        self._write(_plan(12))
+        start = TODAY - timedelta(days=fp.HISTORY_MAX_DAYS + 120)
+        loads = [((start + timedelta(days=i)).isoformat(), 60.0)
+                 for i in range((TODAY - start).days + 1)]
+        recent = (TODAY - timedelta(days=10)).isoformat()
+        d0 = TODAY - timedelta(weeks=40)
+        hist = _hist([(d0, 240), (d0 + timedelta(weeks=8), 252), (d0 + timedelta(weeks=16), 262)])
+        with patch.object(app_module, "api_profile_ftp_history", return_value={"history": hist}), \
+             patch.object(app_module.db, "get_db", return_value=None), \
+             patch("tau_fitting._build_daily_load_series", return_value=loads), \
+             patch.object(app_module.db, "query_wellness",
+                          return_value=[{"date": recent, "ctl": 55.5}]), \
+             patch.object(fp, "build_projection", wraps=fp.build_projection) as spy:
+            d = self._get()
+        ctl_by_day = spy.call_args.kwargs["ctl_by_day"]
+        self.assertEqual(ctl_by_day[recent], 55.5)
+        self.assertAlmostEqual(ctl_by_day[d0.isoformat()], 60.0, delta=0.5)  # EWMA, warmed up
+        self.assertTrue(d["personalised"])
+        self.assertEqual(d["personal_blocks"], 2)
+
 
 # ── Card ───────────────────────────────────────────────────────────────────
 
@@ -441,6 +606,58 @@ def _render_fn(src):
     start = src.index("function renderFtpProjection(p) {")
     end = src.index("\n}\n", start) + 3
     return src[start:end]
+
+
+def _render(payload):
+    harness = """
+const el = {innerHTML: ''};
+const $ = () => el;
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+""" + _render_fn(_html()) + f"""
+renderFtpProjection({json.dumps(payload)});
+console.log(el.innerHTML);
+"""
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True,
+                         encoding="utf-8", timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_card_reduced_load_wording_contract_8b():
+    """#8b: r < 0.7 -> 'likely to hold or slip slightly', no central watts."""
+    payload = fp.build_projection(_plan(12), 250, 75, 60, None, TODAY)
+    payload["load_reduced"] = True
+    payload["within_noise"] = True
+    html = _render(payload)
+    assert "likely to hold or slip slightly" in html
+    assert "within test noise)" not in html
+    assert "~265 W" not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_card_escapes_every_field():
+    """QA N8: numeric fields go through esc() too."""
+    payload = fp.build_projection(_plan(12), 250, 75, 60, None, TODAY)
+    bad = "<img src=x>"
+    payload.update(ftp=bad, tier=bad, hit_per_week=bad, load_ratio=bad)
+    payload["watts"] = {k: bad for k in payload["watts"]}
+    payload["gain_pct"] = {k: bad for k in payload["gain_pct"]}
+    html = _render(payload)
+    assert "<img" not in html
+    assert "&lt;img src=x&gt;" in html
+
+
+def test_card_refreshes_with_plan_overview():
+    """QA S4: renderPlanJSON (Generate, edits, races) and the FTP-raise path
+    (loadWeeklyCalendar) both reload the card."""
+    src = _html()
+    body = src[src.index("async function renderPlanJSON(plan) {"):]
+    body = body[:body.index("\n}\n")]
+    assert "$('plan-summary').innerHTML = summary;\n  loadFtpProjection();" in body
+    weekly = src[src.index("async function loadWeeklyCalendar() {"):]
+    weekly = weekly[:weekly.index("\n}\n")]
+    assert "loadFtpProjection();" in weekly
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

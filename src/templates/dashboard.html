@@ -6921,15 +6921,18 @@ function renderFtpProjection(p) {
   if (!body) return;
   const n = Math.round(p.weeks);
   const w = p.watts || {};
-  const headline = p.within_noise
-    ? `FTP likely to hold (within test noise) over ${n} weeks <span style="color:var(--text3);font-size:12px;">(${w.conservative}–${w.optimistic} W)</span>`
-    : `~${w.central} W in ${n} weeks <span style="color:var(--text3);font-size:12px;">(${w.conservative}–${w.optimistic} W)</span>`;
+  const band = `<span style="color:var(--text3);font-size:12px;">(${esc(w.conservative)}–${esc(w.optimistic)} W)</span>`;
+  const headline = p.load_reduced
+    ? `FTP likely to hold or slip slightly over ${n} weeks ${band}`
+    : p.within_noise
+    ? `FTP likely to hold (within test noise) over ${n} weeks ${band}`
+    : `~${esc(w.central)} W in ${n} weeks ${band}`;
   const inputs = [
-    `Tier ${p.tier} (${esc(p.tier_label)})`,
-    `FTP ${p.ftp} W`,
+    `Tier ${esc(p.tier)} (${esc(p.tier_label)})`,
+    `FTP ${esc(p.ftp)} W`,
     p.ctl_unknown ? 'CTL unknown (tier from W/kg only)' : `CTL ${Math.round(p.ctl)}`,
-    `${p.hit_per_week} hard sessions/wk${p.sweetspot_only ? ' (sweet spot only, counted as 1)' : ''}`,
-    p.load_ratio === null ? 'load ratio n/a' : `load ratio ${p.load_ratio}`,
+    `${esc(p.hit_per_week)} hard sessions/wk${p.sweetspot_only ? ' (sweet spot only, counted as 1)' : ''}`,
+    p.load_ratio === null ? 'load ratio n/a' : `load ratio ${esc(p.load_ratio)}`,
   ].join(' · ');
   const g = p.gain_pct || {};
   const notes = [];
@@ -6941,7 +6944,7 @@ function renderFtpProjection(p) {
     <div style="font-size:11px;color:var(--text2);margin-top:4px;">If you follow this plan. ${inputs}</div>
     <details style="margin-top:8px;font-size:11px;color:var(--text2);">
       <summary style="cursor:pointer;">Why this number</summary>
-      <div style="margin-top:6px;">Expected change ${g.conservative}% / ${g.central}% / ${g.optimistic}% (low / central / high), from trial results by training level, scaled by plan length, hard sessions per week and planned load vs your CTL. Changes under 3% are within FTP test noise. ${notes.map(esc).join(' ')}</div>
+      <div style="margin-top:6px;">Expected change ${esc(g.conservative)}% / ${esc(g.central)}% / ${esc(g.optimistic)}% (low / central / high), from trial results by training level, scaled by plan length, hard sessions per week and planned load vs your CTL. Changes under 3% are within FTP test noise. ${notes.map(esc).join(' ')}</div>
       <div style="font-size:10px;color:var(--text3);margin-top:6px;">Sources: ${(p.model_citations || []).map(esc).join(' · ')}</div>
     </details>`;
 }
@@ -13293,6 +13296,7 @@ async function renderPlanJSON(plan) {
       ? `rolling ${(plan.weeks || []).length || 4}-week horizon &middot; extends weekly`
       : `${phases.length} phases &middot; ${totalWeeks} weeks`}</div>`;
   $('plan-summary').innerHTML = summary;
+  loadFtpProjection();  // the card follows every plan (re)render: Generate, edits, races
 
   // ── MONTHLY CALENDAR (clickable sessions with power blocks) ──
   const weeks = plan.weeks || [];
@@ -17800,6 +17804,7 @@ async function loadWeeklyCalendar() {
 
     // v4.6.7 IMPL-CAP: capability widget render
     loadCapabilityProjection();
+    loadFtpProjection();  // an FTP raise lands here too
 
   } catch(e) {
     console.warn('Weekly calendar failed:', e);
