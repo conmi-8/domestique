@@ -199,6 +199,13 @@ def retitle(name: str, orig_s: float, new_s: float) -> str:
             if old == new:
                 return name
             return re.sub(pat, lambda m, new=new: f"{new}{m.group(1)}", name)
+    # Some <name>s were authored off their own total ("(60min)" on a 62-min
+    # file). A single "(Nmin)" is still the total: shift it by what was removed.
+    totals = re.findall(r"\((\d+)\s?min\)", name)
+    delta = _minutes(new_s) - _minutes(orig_s)
+    if len(totals) == 1 and delta:
+        return re.sub(r"\((\d+)(\s?min)\)",
+                      lambda m: f"({max(0, int(m.group(1)) + delta)}{m.group(2)})", name)
     return name
 
 

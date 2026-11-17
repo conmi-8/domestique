@@ -810,3 +810,12 @@ def test_C2_fileless_fit_per_send_override(stub):
     steps = [m for m in (x.message for x in FitFile.from_bytes(data).records)
              if isinstance(m, WorkoutStepMessage)]
     assert float(steps[0].duration_time) == 180
+
+
+def test_C9_title_authored_off_its_own_total_still_shifts():
+    """C9: a <name> authored a few minutes off its file's total ("(60min)" on a
+    62-min file) still moves by exactly what the trim removed."""
+    import warmup_trim as wt
+    assert wt.retitle("Neuromuscular (60min)", 62 * 60, 56 * 60) == "Neuromuscular (54min)"
+    # two bracketed totals: ambiguous, left alone
+    assert wt.retitle("A (60min) B (10min)", 62 * 60, 56 * 60) == "A (60min) B (10min)"
