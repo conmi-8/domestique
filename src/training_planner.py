@@ -1191,7 +1191,8 @@ def _is_unload_week(w) -> bool:
             or _went_unridden(w))
 
 
-def stepback_due(prior_weeks, phase_name: str, row_end: "date | None" = None) -> bool:
+def stepback_due(prior_weeks, phase_name: str, row_end: "date | None" = None,
+                 goal=None) -> bool:
     """The 3:1 loading rhythm (Rønnestad), over the whole plan: a week is a
     stepback when the STEP_BACK_EVERY - 1 calendar weeks before it were all
     load weeks.
@@ -1213,8 +1214,10 @@ def stepback_due(prior_weeks, phase_name: str, row_end: "date | None" = None) ->
     its Monday) holds fewer than 4 days, its week is the taper's and it is no
     stepback. Counting rows made a lone Monday before a Sunday event a
     47-TSS stepback in 8 of 98 event plans.
+
+    A time-crunched plan (``goal.plan_mode``) has no stepback weeks at all.
     """
-    if phase_name in UNLOAD_PHASES:
+    if phase_name in UNLOAD_PHASES or _is_time_crunched(goal):
         return False
     if row_end is not None and row_end.weekday() + 1 < 4:
         return False
@@ -2610,29 +2613,185 @@ _BAND_TSS_PER_HOUR = {
 }
 
 
-def week_available_minutes(goal, week_start: date) -> int:
+def week_available_minutes(goal, week_start: date, phase_name: str = "") -> int:
     """Minutes this athlete can actually train in the week starting ``week_start``.
 
-    Same rule the sampler uses for its per-day caps (``_max_min_for``): the
-    per-weekday override when there is one, otherwise the weekday/weekend
-    default, and nothing for a rest or unavailable day. Duplicating the rule
-    would let the clamp and the slots disagree about how big a week is.
+    The ride days' caps the week builders use (ride_day_caps), never more
+    than hours_per_week. Duplicating the rule would let the clamp
+    and the slots disagree about how big a week is: sized against every free
+    day, a week that rides five of them was handed seven days' intensity.
     """
+    total = sum(ride_day_caps(goal, week_start, None, phase_name).values())
+    hpw = float(getattr(goal, "hours_per_week", 0) or 0)
+    return int(min(total, hpw * 60)) if hpw > 0 else total
+
+
+# The time-crunched plan style (plan_mode "time_crunched"): fewer, shorter,
+# harder rides -- every ride Z3+, two Z5 days a week, no stepback weeks.
+TIME_CRUNCHED = "time_crunched"
+# A ride day earns its place at this much of the week's budget: 4.5 h is four
+# rides, not seven 38-minute ones.
+_RIDE_DAY_MIN = 60
+# Below this a ride is not a session (the volume pass's floor).
+_RIDE_FLOOR_MIN = 30
+# Weekday order a ride day is chosen in when caps tie: Tue/Thu/Sat are the
+# 48h-spaced hard days the sampler prefers, Mon and Fri rest first.
+_RIDE_DAY_PREFERENCE = (1, 3, 5, 6, 2, 4, 0)
+
+
+def _is_time_crunched(goal) -> bool:
+    return (getattr(goal, "plan_mode", "auto") or "auto") == TIME_CRUNCHED
+
+
+def ride_day_caps(goal, start: date, row_end: "date | None" = None,
+                  phase_name: str = "") -> "dict[int, int]":
+    """Which days of the week row starting at ``start`` ride, and each one's
+    minute cap: ``{offset from start: minutes}``. Every week builder asks this,
+    so a day absent from it is rest.
+
+    The rider's per-day hours are CAPS, never targets, and so is
+    hours_per_week. Giving hours to every day used to mean a session on every
+    day, each filled to its cap: 0.75 h weekdays and 1.5 h weekends with a
+    4.5 h week came out as seven rides and 370 minutes. Here the week's
+    budget decides how many days ride (one per _RIDE_DAY_MIN of it, and never
+    more than the phase's rest days allow, at least one rest day in a
+    time-crunched week) and the longest caps ride first. A chosen day keeps
+    the rider's own cap; the week total is held by hold_week_minutes. Days the
+    rider marked as rest are always rest. A row shorter than a week (a plan
+    opening mid-week) gets the budget and the ride days pro rata.
+    """
+    days = 7 if row_end is None else max(1, min(7, (row_end - start).days + 1))
     rest = set(getattr(goal, "rest_days", []) or [])
     avail = set(getattr(goal, "available_days", list(range(7))) or range(7))
     dmh = getattr(goal, "daily_max_hours", None) or {}
     wd_h = float(getattr(goal, "max_weekday_hours", 0) or 0)
     we_h = float(getattr(goal, "max_weekend_hours", 0) or 0)
-    total = 0.0
-    for off in range(7):
-        wd = (week_start + timedelta(days=off)).weekday()
+    cands = []
+    for off in range(days):
+        wd = (start + timedelta(days=off)).weekday()
         if wd in rest or wd not in avail:
             continue
-        if wd in dmh:
-            total += float(dmh[wd]) * 60.0
-        else:
-            total += (we_h if wd >= 5 else wd_h) * 60.0
-    return int(round(total))
+        cap = int(float(dmh[wd] if wd in dmh else (we_h if wd >= 5 else wd_h)) * 60)
+        if cap >= _RIDE_FLOOR_MIN:
+            cands.append((off, wd, cap))
+    if not cands:
+        return {}
+    hpw = float(getattr(goal, "hours_per_week", 0) or 0)
+    budget = hpw * 60.0 * days / 7.0 if hpw > 0 else float(sum(c[2] for c in cands))
+    min_rest = 1 if _is_time_crunched(goal) else (
+        _PHASE_SHAPE.get(phase_name) or _PHASE_SHAPE["base"]).rest_days_per_week
+    max_ride = max(1, math.ceil((7 - min_rest) * days / 7))
+    n = max(1, min(len(cands), max_ride, int(budget // _RIDE_DAY_MIN)))
+    cands.sort(key=lambda c: (-c[2], _RIDE_DAY_PREFERENCE.index(c[1])))
+    return {off: cap for off, _wd, cap in cands[:n]}
+
+
+def hold_week_minutes(goal, week, overrides: "dict | None" = None) -> None:
+    """A1/A2 on a built week: no session longer than its day's cap (the
+    per-date availability override, else the rider's cap for the day), and
+    the week no longer than hours_per_week (pro rata for a short row). Easy
+    rides give way first, longest first, then the week's long ride, then the
+    hard sessions, never below _RIDE_FLOOR_MIN. The race and the rider's own
+    sessions are never touched."""
+    overrides = overrides or {}
+    start = week.start
+    caps = ride_day_caps(goal, start, week.end, getattr(week, "phase", ""))
+    days = (week.end - start).days + 1
+    hpw = float(getattr(goal, "hours_per_week", 0) or 0)
+    free = [s for s in week.sessions
+            if s is not None and s.session_type != "rest"
+            and (s.duration_min or 0) > 0 and not _race_shape_frozen(s)]
+
+    def _cut(s, new_min):
+        if new_min < s.duration_min:
+            s.tss_estimate = round((s.tss_estimate or 0) * new_min / s.duration_min)
+            s.duration_min = new_min
+
+    for s in free:
+        d_iso = s.day.isoformat()
+        off = (s.day - start).days
+        if d_iso in overrides:
+            _cut(s, int(float(overrides[d_iso]) * 60))
+        elif off in caps:
+            _cut(s, caps[off])
+    if hpw <= 0:
+        return
+    over = sum(s.duration_min for s in week.sessions
+               if s is not None and s.session_type != "rest"
+               and not getattr(s, "is_race", False)) - int(hpw * 60 * days / 7)
+    longest = max(free, key=lambda s: s.duration_min, default=None)
+    for s in sorted(free, key=lambda s: (_session_is_hit(s), s is longest,
+                                         -s.duration_min)):
+        if over <= 0:
+            break
+        cut = min(over, s.duration_min - _RIDE_FLOOR_MIN)
+        if cut > 0:
+            _cut(s, s.duration_min - cut)
+            over -= cut
+
+
+def fill_easy_volume(goal, weeks: list, library: list | None = None) -> None:
+    """Fewer ride days carry the week's load: an endurance ride (z2/long_z2,
+    unstructured, so riding it longer IS the session) grows toward its day's
+    cap while the week is under both its TSS budget and hours_per_week. The
+    sampler's files run short of a week's budget, which seven rides averaged
+    away and five do not; a week left a third short then sat next to a full
+    one, and that jump is what crossed the ACWR line. Load weeks only (a
+    stepback and a taper are meant light); the race, openers and the rider's
+    own sessions keep theirs. A ride grown past its file gets a file of its
+    new length, one the plan has not used yet where the library allows."""
+    hpw = float(getattr(goal, "hours_per_week", 0) or 0)
+    used = {x.zwo_name for w in weeks for x in w.sessions
+            if x is not None and getattr(x, "zwo_name", "")}
+    for w in weeks:
+        budget = float(getattr(w, "tss_target", 0) or 0)
+        if (budget <= 0 or getattr(w, "is_stepback", False)
+                or getattr(w, "phase", "") in UNLOAD_PHASES):
+            continue
+        caps = ride_day_caps(goal, w.start, w.end, w.phase)
+        rides = [x for x in w.sessions if x is not None and x.session_type != "rest"
+                 and not getattr(x, "is_race", False)]
+        tss_room = budget - sum(float(x.tss_estimate or 0) for x in rides)
+        min_room = (hpw * 60 * ((w.end - w.start).days + 1) / 7
+                    - sum(x.duration_min or 0 for x in rides)) if hpw > 0 else float("inf")
+        easy = [x for x in rides
+                if x.session_type in ("z2", "long_z2") and (x.duration_min or 0) > 0
+                and not _race_shape_frozen(x) and not getattr(x, "is_opener", False)
+                and (x.day - w.start).days in caps]
+        was = {id(x): x.duration_min for x in easy}
+        # The ride with the most room first: the long day grows long.
+        easy.sort(key=lambda x: x.duration_min - caps[(x.day - w.start).days])
+        for x in easy:
+            if tss_room <= 0 or min_room <= 0:
+                break
+            per_min = float(x.tss_estimate or 0) / x.duration_min
+            if per_min <= 0:
+                continue
+            add = int(min(caps[(x.day - w.start).days] - x.duration_min,
+                          min_room, tss_room / per_min))
+            if add <= 0:
+                continue
+            x.duration_min += add
+            x.tss_estimate = round(x.duration_min * per_min)
+            tss_room -= add * per_min
+            min_room -= add
+            x.description = f"{x.session_type} ({x.duration_min}min)"
+        for x in easy:
+            if not library or x.duration_min == was[id(x)]:
+                continue
+            dur, tss = x.duration_min, x.tss_estimate
+            x.zwo_file = ""
+            x.zwo_name = ""
+            try:
+                match_zwo(x, library, week_num=w.week_num,
+                          day_idx=(x.day - w.start).days, used_names=used,
+                          widen_band=True)
+            except Exception:  # noqa: BLE001 — a missing file beats a crash
+                log.debug("fill rematch failed for %s", x.day, exc_info=True)
+            if (x.duration_min or 0) > dur:      # the file never outgrows the day
+                x.duration_min, x.tss_estimate = dur, tss
+            if x.zwo_name:
+                used.add(x.zwo_name)
 
 
 # Below this many minutes of z3+ a "hard session" is not delivering the
@@ -3086,7 +3245,7 @@ def _row_budget(ramp, goal, phase, cursor, is_stepback: bool) -> float:
     """The ramp's budget for the week row starting at ``cursor``: the rider's
     hours are its ceiling, and a taper row takes its fraction by position (the
     race week the last)."""
-    hours = week_available_minutes(goal, cursor) / 60.0
+    hours = week_available_minutes(goal, cursor, phase.name) / 60.0
     if getattr(goal, "hours_per_week", None):
         hours = min(hours, float(goal.hours_per_week))
     frac = None
@@ -4183,6 +4342,8 @@ def plan_week(
     # was handed a further full week on top -- nothing in the budget had heard
     # about the rides.
     tss_allocated = max(0.0, float(completed_tss or 0.0))
+    # The ride days and their caps come from the week's budget (ride_day_caps).
+    _ride = ride_day_caps(goal, start, _row_end(start, phase), phase.name)
 
     for day_offset in range(7):
         d = start + timedelta(days=day_offset)
@@ -4190,7 +4351,7 @@ def plan_week(
         day_name = d.strftime("%a")
 
         # Rest day
-        if weekday in goal.rest_days or weekday not in goal.available_days:
+        if day_offset not in _ride:
             sessions.append(PlannedSession(
                 day=d, day_name=day_name, session_type="rest",
                 duration_min=0, tss_estimate=0,
@@ -4200,8 +4361,7 @@ def plan_week(
 
         # Determine max duration — use per-day availability if set
         is_weekend = weekday >= 5
-        max_hours = goal.max_hours_for_day(weekday)
-        max_min = int(max_hours * 60)
+        max_min = _ride[day_offset]
 
         # Determine session type based on phase + day position
         remaining_tss = tss_target - tss_allocated
@@ -4221,11 +4381,7 @@ def plan_week(
                 ),
             ))
             continue
-        remaining_days = sum(
-            1 for i in range(day_offset + 1, 7)
-            if (start + timedelta(days=i)).weekday() not in goal.rest_days
-            and (start + timedelta(days=i)).weekday() in goal.available_days
-        )
+        remaining_days = sum(1 for i in range(day_offset + 1, 7) if i in _ride)
 
         # This day's share of what is left. Weights are normalised across the
         # days actually remaining, so giving the weekend long ride a bigger
@@ -4235,8 +4391,7 @@ def plan_week(
         _remaining_weight = 0.0
         for _i in range(day_offset, 7):
             _dd = start + timedelta(days=_i)
-            if (_dd.weekday() in goal.rest_days
-                    or _dd.weekday() not in goal.available_days):
+            if _i not in _ride:
                 continue
             _remaining_weight += _LONG_DAY_WEIGHT if _dd.weekday() >= 5 else 1.0
         _today_weight = _LONG_DAY_WEIGHT if is_weekend else 1.0
@@ -7418,13 +7573,8 @@ def expand_blueprint_week(ctx: "week_plan.WeekContext",
     phase, goal = ctx.phase, ctx.goal
     week_num, week_start = ctx.week_num, ctx.start
     is_stepback, week_in_phase = ctx.is_stepback, ctx.week_in_phase
-    available_days, rest_days = goal.available_days, goal.rest_days
-    daily_max_hours = goal.daily_max_hours
-    max_weekday_hours, max_weekend_hours = goal.max_weekday_hours, goal.max_weekend_hours
-    def _cap_min(weekday: int) -> int:
-        if daily_max_hours and weekday in daily_max_hours:
-            return int(daily_max_hours[weekday] * 60)
-        return int((max_weekend_hours if weekday >= 5 else max_weekday_hours) * 60)
+    # The ride days and their caps come from the week's budget (ride_day_caps).
+    _ride = ride_day_caps(goal, week_start, _row_end(week_start, phase), phase.name)
 
     bp_hit = _blueprint_hit_for(goal, phase.name, week_num)
     # Lay rest vs train by offset from week_start (matches plan_week + the caller).
@@ -7432,13 +7582,13 @@ def expand_blueprint_week(ctx: "week_plan.WeekContext",
     for off in range(7):
         d = week_start + timedelta(days=off)
         wd = d.weekday()
-        if wd in rest_days or wd not in available_days:
+        if off not in _ride:
             slots.append(PlannedSession(
                 day=d, day_name=d.strftime("%a"), session_type="rest",
                 duration_min=0, tss_estimate=0,
                 description="Rest — recovery takes priority"))
         else:
-            slots.append((d, wd))  # training placeholder
+            slots.append((d, wd, _ride[off]))  # training placeholder
 
     train_i = [i for i, s in enumerate(slots) if isinstance(s, tuple)]
     # One HIT per build week (D2); none on a deload (B3/B4 keep deloads easy).
@@ -7448,8 +7598,7 @@ def expand_blueprint_week(ctx: "week_plan.WeekContext",
         hit_i = weekday_train[len(weekday_train) // 2]
 
     for i in train_i:
-        d, wd = slots[i]
-        cap = _cap_min(wd)
+        d, wd, cap = slots[i]
         is_weekend = wd >= 5
         if i == hit_i:
             st = bp_hit["session_type"]
@@ -7525,7 +7674,6 @@ def sample_week_workouts(ctx: "week_plan.WeekContext", state: "week_plan.PlanSta
     is_stepback, week_in_phase = ctx.is_stepback, ctx.week_in_phase
     emphasis_profile, block_focus = ctx.emphasis_profile, ctx.block_focus
     goal_type = getattr(goal, "goal_type", "general")
-    available_days, rest_days = goal.available_days, goal.rest_days
     daily_max_hours = goal.daily_max_hours
     max_weekday_hours, max_weekend_hours = goal.max_weekday_hours, goal.max_weekend_hours
     library, used_names, pool_index = state.library, state.used_names, state.pool_index
@@ -7594,13 +7742,15 @@ def sample_week_workouts(ctx: "week_plan.WeekContext", state: "week_plan.PlanSta
             return int(daily_max_hours[weekday] * 60)
         return int((max_weekend_hours if weekday >= 5 else max_weekday_hours) * 60)
 
-    # Build slot list: (idx, date, day_name, weekday, max_min, is_rest)
+    # Build slot list: (idx, date, day_name, weekday, max_min, is_rest). The
+    # ride days and their caps come from the week's budget (ride_day_caps).
+    _ride = ride_day_caps(goal, week_start, _row_end(week_start, phase), phase.name)
     slots: list[tuple[int, date, str, int, int, bool]] = []
     for off in range(7):
         d = week_start + timedelta(days=off)
         wd = d.weekday()
-        is_rest = (wd in rest_days) or (wd not in available_days)
-        slots.append((off, d, d.strftime("%a"), wd, _max_min_for(wd), is_rest))
+        slots.append((off, d, d.strftime("%a"), wd,
+                      _ride.get(off, _max_min_for(wd)), off not in _ride))
 
     # 1. Identify HIT slots: pick `hit_count` slots, preferring Tue/Thu/Sat (the
     # canonical 48h-spaced pattern for endurance athletes).
@@ -7613,14 +7763,25 @@ def sample_week_workouts(ctx: "week_plan.WeekContext", state: "week_plan.PlanSta
     non_rest = [s for s in slots if not s[5]]
     # Cap HIT count by 48h-gap feasibility (need ≥1 non-rest day between HITs).
     hit_count = min(hit_count, max(0, len(non_rest) // 2 + (1 if len(non_rest) % 2 else 0)))
+    # ...and by the time the ride days actually hold: a week the budget cut to
+    # five short rides cannot carry the hard sessions of seven.
+    hit_count = hit_slots_for_volume(sum(s[4] for s in non_rest), hit_count)
 
     preferred_hit_weekdays = [1, 3, 5]  # Tue, Thu, Sat
     hit_slot_idxs: set[int] = set()
+    # The week's one long day stays easy while there are days to spare: with
+    # the budget choosing fewer ride days, a hard Saturday took the only ride
+    # long enough to carry the week's easy minutes.
+    _caps = sorted((s[4] for s in non_rest), reverse=True)
+    _long = (max(non_rest, key=lambda s: s[4])
+             if len(non_rest) > hit_count + 1 and _caps[0] > _caps[1] else None)
     # First pass — preferred days that are non-rest
     for wd in preferred_hit_weekdays:
         if len(hit_slot_idxs) >= hit_count:
             break
         for s in non_rest:
+            if s is _long:
+                continue
             if s[3] == wd and s[0] not in hit_slot_idxs:
                 # 48h gap check vs already-picked HIT slots
                 if all(abs(s[0] - i) >= 2 for i in hit_slot_idxs):
@@ -7630,6 +7791,7 @@ def sample_week_workouts(ctx: "week_plan.WeekContext", state: "week_plan.PlanSta
     if len(hit_slot_idxs) < hit_count:
         rest = [s for s in non_rest if s[0] not in hit_slot_idxs]
         rng.shuffle(rest)
+        rest.sort(key=lambda s: s is _long)     # the long day last
         for s in rest:
             if len(hit_slot_idxs) >= hit_count:
                 break
@@ -8674,7 +8836,7 @@ def week_context(goal, phase, week_num: int, start: date, *, is_stepback: bool,
         week_num=week_num, start=start, phase=phase, goal=goal,
         is_stepback=is_stepback, seed_salt=seed_salt, week_in_phase=week_in_phase,
         emphasis_profile=_week_emphasis(goal, phase.name, event_targets),
-        block_focus=(None if plan_mode in _BLUEPRINT_MODES
+        block_focus=(None if plan_mode in (*_BLUEPRINT_MODES, TIME_CRUNCHED)
                      else _block_focus_for(phase.name, goal, is_stepback)),
         plan_mode=plan_mode, event_targets=event_targets, **extra)
 
@@ -8686,7 +8848,187 @@ def propose_week(ctx, state, budget) -> list:
     two hard sessions (dupes.md DUP-4)."""
     if ctx.plan_mode in _BLUEPRINT_MODES:
         return expand_blueprint_week(ctx, budget)
+    if ctx.plan_mode == TIME_CRUNCHED:
+        return time_crunched_week(ctx, state)
     return sample_week_workouts(ctx, state, budget)
+
+
+# ── Time-crunched plan style (plan_mode "time_crunched") ─────────────────────
+# Short and hard: every ride Z3+, two Z5 days in a week of four or more rides
+# (one in a week of two or three), never on consecutive days; no stepback
+# weeks, a rest day before an FTP test instead. Only the Z5 work counts as the
+# week's hard sessions; sweetspot, threshold, tempo and over-unders are the
+# style's ordinary days.
+_Z5_SESSION_TYPES = frozenset({"vo2max", "sprint"})
+_Z5_CONTENT_CLASSES = frozenset({"vo2max", "vo2_ladder", "vo2_short",
+                                 "anaerobic", "neuromuscular"})
+_TC_EASY_TYPES = frozenset({"z2", "long_z2", "recovery", "endurance"})
+# The non-Z5 days of a week, cycled in this order, by phase.
+_TC_ROTATION = {
+    "base":   ("sweetspot", "tempo", "threshold"),
+    "build1": ("threshold", "sweetspot", "overunder"),
+    "build2": ("overunder", "threshold", "sweetspot"),
+    "peak":   ("threshold", "overunder"),
+    "taper":  ("threshold", "sweetspot"),
+}
+_TC_ROTATION_DEFAULT = ("sweetspot", "threshold", "tempo")
+# Z5 days go on short weekdays first, so the long days carry sustained work.
+_TC_Z5_PREFERENCE = (1, 3, 2, 0, 4, 5, 6)
+
+
+def _session_is_z5(sess) -> bool:
+    """A Z5 session by type or by the content of the file it serves: the only
+    kind a time-crunched week counts under its hard-session cap."""
+    if sess is None or getattr(sess, "session_type", "") == "rest":
+        return False
+    return (sess.session_type in _Z5_SESSION_TYPES
+            or _content_class_for_zwo(getattr(sess, "zwo_file", "") or "")
+            in _Z5_CONTENT_CLASSES)
+
+
+def _tc_z5_count(ride_days: int) -> int:
+    return 2 if ride_days >= 4 else 1 if ride_days >= 2 else 0
+
+
+def _tc_retype(s, st: str, library, why: str, **match_kw) -> None:
+    """Turn ``s`` into a ``st`` session no longer than it was, with a library
+    workout of that type (content-based match). Retyping a planned session
+    never adds load: the week's TSS ceiling has already been held."""
+    dur = int(s.duration_min or 0)
+    was_tss = float(s.tss_estimate or 0)
+    ceil = TYPE_CEILING.get(st)
+    if ceil:
+        dur = min(dur, ceil)
+    s.session_type = st
+    s.duration_min = dur
+    s.tss_estimate = round(dur / 60 * TSS_PER_HOUR.get(st, 75))
+    s.zwo_file = ""
+    s.zwo_name = ""
+    s.description = f"{CAL_SESSION_LABEL_SAFE(st)} ({dur}min) — {why}"
+    if library:
+        try:
+            match_zwo(s, library, **match_kw)
+        except Exception:  # noqa: BLE001 — a missing file beats a crash
+            log.debug("time-crunched match failed for %s", s.day, exc_info=True)
+    if (s.duration_min or 0) > dur:     # a match never lengthens the day
+        s.tss_estimate = round((s.tss_estimate or 0) * dur / s.duration_min)
+        s.duration_min = dur
+    if 0 < was_tss < (s.tss_estimate or 0) and s.duration_min:
+        k = was_tss / s.tss_estimate
+        s.duration_min = max(_RIDE_FLOOR_MIN, int(s.duration_min * k))
+        s.tss_estimate = round(was_tss)
+
+
+def time_crunched_week(ctx, state) -> list["PlannedSession"]:
+    """A time-crunched week, Mon..Sun from ``ctx.start``: the ride days and
+    caps of ride_day_caps, the Z5 days spaced, every other ride the phase's
+    Z3/Z4 rotation, each matched to a library workout by content class."""
+    goal, phase, start = ctx.goal, ctx.phase, ctx.start
+    ride = ride_day_caps(goal, start, _row_end(start, phase), phase.name)
+    blocked = {s.day for s in (ctx.prev_week_sessions or []) if _session_is_z5(s)}
+    z5: set = set()
+    days = sorted((start + timedelta(days=o) for o in ride),
+                  key=lambda d: _TC_Z5_PREFERENCE.index(d.weekday()))
+    for d in days:
+        if len(z5) >= _tc_z5_count(len(ride)):
+            break
+        if not any(abs((d - x).days) < 2 for x in z5 | blocked):
+            z5.add(d)
+    rot = _TC_ROTATION.get(phase.name, _TC_ROTATION_DEFAULT)
+    library = getattr(state, "library", None) or []
+    used = getattr(state, "used_names", None)
+    used_set = set(used or ())
+    micro = bool(getattr(goal, "vo2_microintervals_only", False))
+    out, j = [], 0
+    for off in range(7):
+        d = start + timedelta(days=off)
+        s = PlannedSession(day=d, day_name=d.strftime("%a"), session_type="rest",
+                           duration_min=0, tss_estimate=0,
+                           description="Rest — recovery takes priority")
+        if off in ride:
+            if d in z5:
+                st = "vo2max"
+            else:
+                st, j = rot[(ctx.week_num + j) % len(rot)], j + 1
+            s.duration_min = ride[off]
+            _tc_retype(s, st, library, "time-crunched", week_num=ctx.week_num,
+                       day_idx=off, used_names=used_set,
+                       seed_salt=ctx.seed_salt, micro_only=micro)
+            if isinstance(used, dict) and s.zwo_name:
+                used[s.zwo_name] = ctx.week_num
+        out.append(s)
+    return out
+
+
+def _settle_time_crunched(weeks: list, library: list | None = None,
+                          plan_start_date=None, seed_salt: int = 0) -> list[str]:
+    """The time-crunched week on what the rider receives -- the last pass of
+    every writer, in place of the 48 h easing (which would turn this style's
+    back-to-back Z3/Z4 days into endurance). An easy ride a safety pass left
+    becomes rest (every ride is Z3+), the day before an FTP test rests, and
+    each week holds its Z5 count with no two Z5 days in a row. Only pending,
+    planner-owned future sessions change."""
+    changed: list[str] = []
+    today = clock.today()
+    kw = dict(plan_start_date=plan_start_date, seed_salt=seed_salt)
+
+    def _free(s) -> bool:
+        return (s is not None and s.session_type not in ("rest", "ftp_test")
+                and s.day >= today and not _race_shape_frozen(s)
+                and not getattr(s, "is_opener", False)
+                and not getattr(s, "adapted", False))
+
+    def _rest(s, why: str) -> None:
+        changed.append(f"{s.day}: {s.session_type} -> rest")
+        s.session_type = "rest"
+        s.duration_min = 0
+        s.tss_estimate = 0
+        s.zwo_file = ""
+        s.zwo_name = ""
+        s.description = f"Rest — {why}"
+
+    sessions = sorted((s for w in weeks for s in (w.sessions or []) if s is not None),
+                      key=lambda s: s.day)
+    by_day = {s.day: s for s in sessions}
+    for s in sessions:
+        if s.session_type == "ftp_test":
+            prev = by_day.get(s.day - timedelta(days=1))
+            if _free(prev):
+                _rest(prev, "fresh legs for tomorrow's FTP test")
+    for s in sessions:
+        if _free(s) and s.session_type in _TC_EASY_TYPES:
+            _rest(s, "a time-crunched week rides hard or not at all")
+    z5_days = {s.day for s in sessions if _session_is_z5(s)}
+    for w in sorted(weeks, key=lambda w: w.start):
+        rides = sorted((s for s in w.sessions if s is not None
+                        and s.session_type != "rest" and (s.duration_min or 0) > 0),
+                       key=lambda s: s.day)
+        k, kept = _tc_z5_count(len(rides)), 0
+        for s in rides:
+            if s.day not in z5_days:
+                continue
+            if kept < k and (s.day - timedelta(days=1)) not in z5_days:
+                kept += 1
+            elif _free(s):
+                z5_days.discard(s.day)
+                changed.append(f"{s.day}: {s.session_type} -> threshold")
+                _tc_retype(s, "threshold", library, "time-crunched", **kw)
+            else:
+                kept += 1                      # the rider's own; it stays
+        for s in sorted(rides, key=lambda s: _TC_Z5_PREFERENCE.index(s.day.weekday())):
+            if kept >= k:
+                break
+            nxt = by_day.get(s.day + timedelta(days=1))
+            if (not _free(s) or s.day in z5_days
+                    or (s.day - timedelta(days=1)) in z5_days
+                    or (s.day + timedelta(days=1)) in z5_days
+                    or getattr(nxt, "session_type", "") == "ftp_test"):
+                continue
+            z5_days.add(s.day)
+            kept += 1
+            changed.append(f"{s.day}: {s.session_type} -> vo2max")
+            _tc_retype(s, "vo2max", library, "time-crunched", **kw)
+    return changed
 
 
 def _week_in_phase(weeks: list, idx: int) -> int:
@@ -8961,7 +9303,8 @@ def generate_plan(
             cursor = phase.start
             week_in_phase = 0  # 0-indexed within this phase (for Layer 2 mix-row pick)
             while cursor <= phase.end:
-                is_stepback = stepback_due(weeks, phase.name, _row_end(cursor, phase))
+                is_stepback = stepback_due(weeks, phase.name, _row_end(cursor, phase),
+                                           goal=goal)
                 _budget = _row_budget(_ramp, goal, phase, cursor, is_stepback)
 
                 if _USE_TRAINING_WEEK:
@@ -9038,7 +9381,7 @@ def generate_plan(
                 _net_target = max(0.0, pw.tss_target - _done_tss)
                 budget = scale_budget_to_week(
                     budget, _net_target,
-                    week_available_minutes(goal, pw.start),
+                    week_available_minutes(goal, pw.start, phase.name),
                     model=active_model_for_phase(phase.name, goal), phase_name=phase.name,
                     spent_zones=_completed_zones_in(
                         activities, _monday_on_or_before(pw.start), pw.end))
@@ -9149,7 +9492,8 @@ def generate_plan(
     # (which target per-phase coverage and may overshoot a week's per-week
     # budget). Demotes any excess HIT to a real endurance/tempo library file
     # so no non-stepback week exceeds get_budget_for_phase(phase).hit_count_max.
-    _enforce_weekly_hit_cap(weeks, library)
+    if not _is_time_crunched(goal):
+        _enforce_weekly_hit_cap(weeks, library)
     _ensure_fresh_legs_before_ftp_tests(weeks)
 
     # ── v1.3.2 IMPL-AVAILABILITY-IN-GENERATE ──────────────────────────────
@@ -9278,7 +9622,8 @@ def generate_plan(
     # sessions and keeping ≥1 rest day + the polarized shape. Runs after the
     # event long-ride growth (so the long ride is preserved last) and right
     # before the authoritative per-day clamp.
-    _enforce_weekly_volume_ceiling(weeks)
+    _enforce_weekly_volume_ceiling(weeks, crunched=_is_time_crunched(goal))
+    fill_easy_volume(goal, weeks, library)
 
     # v2.1.0 (F4) — no hard session in the final days before the A event (event
     # goals only). Demotes a taper-eve VO2max/threshold block to an easy opener.
@@ -9380,6 +9725,8 @@ def generate_plan(
                 _scale = _eff / float(s.duration_min)
                 s.tss_estimate = round((s.tss_estimate or 0) * _scale)
                 s.duration_min = _eff
+        # Per-day hours and hours_per_week are caps (ride_day_caps).
+        hold_week_minutes(goal, w, _avail)
 
     # B5 — re-route any easy slot that the sampler/match left holding a too-hard
     # (interval-structured) file to a genuine easy file, and recompute its TSS.
@@ -9395,7 +9742,8 @@ def generate_plan(
     # week back over its budget.
     _spaced = _space_hard_days_across_plan(weeks, library,
                                            plan_start_date=plan_start_date,
-                                           seed_salt=seed_salt)
+                                           seed_salt=seed_salt,
+                                           crunched=_is_time_crunched(goal))
     if _spaced:
         log.info("eased for 48h spacing: %s", "; ".join(_spaced))
 
@@ -9404,7 +9752,11 @@ def generate_plan(
     # reference was measured against pre-clamp sums. Re-anchor the taper rows
     # on the FINAL build-week sums (taper wk1 ≤ 0.60×, race week ≤ 0.40× the
     # actual pre-taper max). taper_only → strict no-op for non-event plans.
-    _enforce_weekly_volume_ceiling(weeks, taper_only=True)
+    _enforce_weekly_volume_ceiling(weeks, taper_only=True,
+                                   crunched=_is_time_crunched(goal))
+    if _is_time_crunched(goal):
+        _settle_time_crunched(weeks, library, plan_start_date=plan_start_date,
+                              seed_salt=seed_salt)
 
     # B3 — guarantee each step-back week is the lightest in its block. Runs LAST,
     # after the per-day clamp above could have trimmed a build week below the
@@ -10326,6 +10678,8 @@ _VOLUME_SHRINK_ORDER = ("recovery", "tempo", "z2", "long_z2")
 # the FIRST thing a taper sheds (Mujika 2003: drop volume 40-60%, keep
 # intensity), the short recovery spins the last (already the lightest dose).
 _VOLUME_SHRINK_ORDER_TAPER = ("long_z2", "z2", "tempo", "recovery")
+# A time-crunched week has no easy volume: its non-Z5 days give way instead.
+_VOLUME_SHRINK_ORDER_CRUNCHED = ("tempo", "sweetspot", "overunder", "threshold")
 # FC2a (v2.5.0, D5): descending taper weekly-TSS budgets as fractions of the
 # ACTUAL pre-taper reference (max of the last ≤3 FULL non-stepback week sums,
 # measured at trim time — NOT the model's peak_weekly_tss, which the emitted
@@ -10340,7 +10694,8 @@ _VOLUME_MIN_SESSION_MIN = 30
 _VOLUME_CEILING_TOLERANCE = 1.05
 
 
-def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False) -> None:
+def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False,
+                                   crunched: bool = False) -> None:
     """v2.1.0 (E1) — cap each week's summed planned TSS at its load-based ceiling.
 
     The ceiling is the week's own ``tss_target``, the LoadRamp's budget (Step
@@ -10369,6 +10724,9 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False) -> Non
     clamp, so the taper budget anchors on the FINAL build-week sums (the first
     call ran mid-pipeline, before the clamp shrank the builds). A strict no-op
     for plans without a taper (non-event parity).
+
+    ``crunched`` (a time-crunched plan, which has no easy volume): the days it
+    sheds are the non-Z5 rides, tempo first, so the load ceiling still holds.
     """
     if not weeks:
         return
@@ -10415,7 +10773,9 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False) -> Non
             if ceiling <= 0:
                 continue
         budget = ceiling * _VOLUME_CEILING_TOLERANCE
-        _shrink_order = _VOLUME_SHRINK_ORDER_TAPER if _is_taper else _VOLUME_SHRINK_ORDER
+        _shrink_order = (_VOLUME_SHRINK_ORDER_CRUNCHED if crunched
+                         else _VOLUME_SHRINK_ORDER_TAPER if _is_taper
+                         else _VOLUME_SHRINK_ORDER)
 
         def _easy_slots(_wk=wk, _order=_shrink_order):
             """(index, session) for non-HIT, non-rest, shrinkable slots, ordered
@@ -10427,7 +10787,8 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False) -> Non
                     continue
                 if (s.duration_min or 0) <= 0:
                     continue
-                if _session_is_hit(s):
+                if (_session_is_z5(s) or s.session_type == "ftp_test"
+                        if crunched else _session_is_hit(s)):
                     continue
                 # FC3 + §6.12 (v2.5.0): the race entry, user-pinned moves/swaps,
                 # done/dismissed records and unavailable days are never "easy
@@ -11059,7 +11420,8 @@ def _place_opener(weeks: list, d, library) -> None:
 
 def _space_hard_days_across_plan(weeks: list, library: list | None = None,
                                  plan_start_date=None,
-                                 seed_salt: int = 0) -> list[str]:
+                                 seed_salt: int = 0,
+                                 crunched: bool = False) -> list[str]:
     """48 h between hard days, applied to the FINAL plan.
 
     Deliberately the last thing that touches a week, and the reason is worth
@@ -11083,7 +11445,14 @@ def _space_hard_days_across_plan(weeks: list, library: list | None = None,
     the rematch here the athlete is handed a session with no workout at all,
     which is how two eased z2 rides went missing from a week's measured
     distribution entirely.
+
+    ``crunched``: a time-crunched plan rides hard on consecutive days by
+    design; its spacing rule (no two Z5 days in a row) is
+    _settle_time_crunched's, which runs instead.
     """
+    if crunched:
+        return _settle_time_crunched(weeks, library, plan_start_date=plan_start_date,
+                                     seed_salt=seed_salt)
     changed: list[str] = []
     sessions = sorted(
         (s for w in weeks for s in (w.sessions or []) if s is not None),
@@ -13889,7 +14258,7 @@ def regenerate_from_today(
             # restarted at every phase, which ran up to six load weeks.
             is_stepback = stepback_due(
                 [*past_weeks, *recovery_weeks, *new_weeks], phase.name,
-                _row_end(cursor, phase))
+                _row_end(cursor, phase), goal=adjusted_goal)
             _budget = _row_budget(_ramp, adjusted_goal, phase, cursor, is_stepback)
             if _USE_TRAINING_WEEK:
                 _tw = week_plan.TrainingWeek(
@@ -13963,7 +14332,7 @@ def regenerate_from_today(
             # stepback and ACWR discounts.
             budget = scale_budget_to_week(
                 budget, pw.tss_target,
-                week_available_minutes(adjusted_goal, pw.start),
+                week_available_minutes(adjusted_goal, pw.start, phase.name),
                 model=active_model_for_phase(phase.name, adjusted_goal), phase_name=phase.name,
                 spent_zones=_completed_zones_in(activities, pw.start, pw.end))
             phase_rot = recent_hit_by_phase.setdefault(phase.name, [])
@@ -14055,7 +14424,9 @@ def regenerate_from_today(
     # generate_plan (it had neither clamp — the comeback ramp, the one place
     # overload matters most, was the least-clamped output in the system).
     _future_weeks = recovery_weeks + new_weeks
-    _enforce_weekly_volume_ceiling(_future_weeks)
+    _enforce_weekly_volume_ceiling(_future_weeks,
+                                   crunched=_is_time_crunched(adjusted_goal))
+    fill_easy_volume(adjusted_goal, _future_weeks, library)
 
     # Renumber recovery weeks
     for i, rw in enumerate(recovery_weeks):
@@ -14119,10 +14490,12 @@ def regenerate_from_today(
                 _scale = _eff / float(_s.duration_min)
                 _s.tss_estimate = round((_s.tss_estimate or 0) * _scale)
                 _s.duration_min = _eff
+        hold_week_minutes(adjusted_goal, _w)
 
     # FC2a parity: re-anchor the taper budget on the FINAL (post-clamp) build
     # sums — a strict no-op when the rebuilt span holds no taper rows.
-    _enforce_weekly_volume_ceiling(_future_weeks, taper_only=True)
+    _enforce_weekly_volume_ceiling(_future_weeks, taper_only=True,
+                                   crunched=_is_time_crunched(adjusted_goal))
 
     # 48 h between hard days. Measured before this was here: a 40-rider sweep
     # found back-to-back hard days ONLY in the paths that skipped this pass --
@@ -14133,7 +14506,8 @@ def regenerate_from_today(
     for _tw in _owners_rg:
         _tw.finish()
 
-    _space_hard_days_across_plan(_future_weeks, library, seed_salt=seed_salt)
+    _space_hard_days_across_plan(_future_weeks, library, seed_salt=seed_salt,
+                                 crunched=_is_time_crunched(adjusted_goal))
 
     # R4/R5 (2026-07-07) — R4a: slot/file coherence, ONCE, LAST (grill A2).
     # Future weeks only; same seed anchor as this path's fallback matches.
@@ -14472,7 +14846,7 @@ def recalculate_plan(
         week_in_phase = 0  # v2.0.3 F6: 0-indexed within phase, drives the sampler
         while cursor <= phase.end:
             is_stepback = stepback_due([*past_weeks, *new_weeks], phase.name,
-                                       _row_end(cursor, phase))
+                                       _row_end(cursor, phase), goal=adjusted_goal)
             _budget = _row_budget(_ramp, adjusted_goal, phase, cursor, is_stepback)
 
             # A due test (six weeks since the last) waits for the next unload
@@ -14527,7 +14901,7 @@ def recalculate_plan(
             # stepback and ACWR discounts.
             budget = scale_budget_to_week(
                 budget, pw.tss_target,
-                week_available_minutes(adjusted_goal, pw.start),
+                week_available_minutes(adjusted_goal, pw.start, phase.name),
                 model=active_model_for_phase(phase.name, adjusted_goal), phase_name=phase.name,
                 spent_zones=_completed_zones_in(recent_activities, pw.start, pw.end))
             phase_rot = recent_hit_by_phase.setdefault(phase.name, [])
@@ -14650,7 +15024,9 @@ def recalculate_plan(
     # never did: its rebuilt weeks came out sized by the rider's free time,
     # ~530 TSS in 15 of 17 weeks against a 325 TSS ACWR ceiling (dupes.md
     # DUP-1). The same pass the other two run.
-    _enforce_weekly_volume_ceiling(new_weeks)
+    _enforce_weekly_volume_ceiling(new_weeks,
+                                   crunched=_is_time_crunched(adjusted_goal))
+    fill_easy_volume(adjusted_goal, new_weeks, library)
 
     all_weeks = past_weeks + new_weeks
 
@@ -14706,9 +15082,11 @@ def recalculate_plan(
                 _scale = _eff / float(_s.duration_min)
                 _s.tss_estimate = round((_s.tss_estimate or 0) * _scale)
                 _s.duration_min = _eff
+        hold_week_minutes(adjusted_goal, _w)
 
     # FC2a parity: the taper budget anchors on the final, clamped build weeks.
-    _enforce_weekly_volume_ceiling(new_weeks, taper_only=True)
+    _enforce_weekly_volume_ceiling(new_weeks, taper_only=True,
+                                   crunched=_is_time_crunched(adjusted_goal))
 
     # R4/R5 (2026-07-07) — R4a: slot/file coherence, ONCE, LAST (grill A2 —
     # 48 h between hard days. Measured before this was here: a 40-rider sweep
@@ -14717,7 +15095,8 @@ def recalculate_plan(
     # the one entry point whose hand-assembled pass list included it. Runs
     # before the coherence pass so an eased session gets a matching file
     # instead of keeping the VO2 workout it no longer is.
-    _space_hard_days_across_plan(new_weeks, library)
+    _space_hard_days_across_plan(new_weeks, library,
+                                 crunched=_is_time_crunched(adjusted_goal))
 
     # AFTER the A8 clamp above, which shrinks slots in place and thereby
     # CREATES exactly the file>slot decouplings this pass repairs by rematch).
@@ -14905,7 +15284,7 @@ def extend_continuous_plan(
         # including a deload the app advanced into one of them.
         is_stepback = stepback_due(
             sorted(current_plan_weeks, key=lambda w: w.start) + new_weeks, phase.name,
-            _row_end(cursor, phase))
+            _row_end(cursor, phase), goal=goal)
         _budget = _row_budget(_ramp, goal, phase, cursor, is_stepback)
         ftp_test_week = (is_stepback
                          and (week_num - _last_test_wk >= 6
@@ -14937,7 +15316,7 @@ def extend_continuous_plan(
         # the branch: expand_blueprint_week reads it too.
         budget = scale_budget_to_week(
             phase_budget, pw.tss_target,
-            week_available_minutes(goal, pw.start),
+            week_available_minutes(goal, pw.start, phase.name),
             model=active_model_for_phase(phase.name, goal), phase_name=phase.name)
 
         # week_in_phase continues the rolling stream: generate emits week_num N
@@ -15027,7 +15406,8 @@ def extend_continuous_plan(
             used_names_dict, used_names,
             count_weeks=_rolling_window)
         _enforce_ronnestad_floor(new_weeks, pool_index, plan_pick_counts)
-    _enforce_weekly_hit_cap(new_weeks, library)
+    if not _is_time_crunched(goal):
+        _enforce_weekly_hit_cap(new_weeks, library)
     # FTP-tests IP W1e: fresh-legs guard on the appended weeks too — the hard
     # floor passes above can land a HIT session the day before an appended
     # test, exactly the gap the generation path already closes. Appended weeks
@@ -15054,6 +15434,7 @@ def extend_continuous_plan(
                 _scale = _eff / float(_s.duration_min)
                 _s.tss_estimate = round((_s.tss_estimate or 0) * _scale)
                 _s.duration_min = _eff
+        hold_week_minutes(goal, _w)
 
     # 48 h between hard days. Measured before this was here: a 40-rider sweep
     # found back-to-back hard days ONLY in the paths that skipped this pass --
@@ -15061,7 +15442,8 @@ def extend_continuous_plan(
     # the one entry point whose hand-assembled pass list included it. Runs
     # before the coherence pass so an eased session gets a matching file
     # instead of keeping the VO2 workout it no longer is.
-    _space_hard_days_across_plan(new_weeks, library)
+    _space_hard_days_across_plan(new_weeks, library,
+                                 crunched=_is_time_crunched(goal))
 
     # Slot/file coherence, ONCE, LAST (R4a parity — after the clamp).
     _enforce_slot_file_coherence(
@@ -15262,7 +15644,7 @@ def refit_remaining_week(
     # week, and the HIT slot floor -- derived from the remaining hard budget --
     # came out far too high, so the freed slot could not be re-owed.
     budget = scale_budget_to_week(
-        budget, week.tss_target, week_available_minutes(goal, week.start),
+        budget, week.tss_target, week_available_minutes(goal, week.start, week.phase),
         model=active_model_for_phase(week.phase, goal), phase_name=week.phase)
     sampled = propose_week(
         week_context(
@@ -15521,7 +15903,8 @@ def refit_remaining_week(
     # instead of keeping the VO2 workout it no longer is.
     # Only this week: refit owns one week, and reaching into its
     # neighbours would edit sessions the athlete may already have ridden.
-    _space_hard_days_across_plan([week], library, seed_salt=seed_salt)
+    _space_hard_days_across_plan([week], library, seed_salt=seed_salt,
+                                 crunched=_is_time_crunched(goal))
 
     # _refit_session_frozen day<today rule so a past (missed-but-unmarked)
     # session is never rematched into a different historical record.
