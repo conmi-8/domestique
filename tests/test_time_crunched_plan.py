@@ -250,3 +250,195 @@ def test_b7_survives_reforecast(freeze_clock):
     for w in weeks:
         w.sessions = [s for s in w.sessions if s.day < eve]
     _assert_crunched(weeks, today)
+
+
+
+# ── Budget first (B6', B2', B9, B8') ─────────────────────────────────────────
+# The rider QA found it with: CTL 6.5, 264 W / 98 kg, 4.5 h, weekdays 0.5-0.75 h,
+# weekends 1.5 h. Built rides-first, week 1 was 112 TSS against a 58 budget.
+USER_DMH = {0: 0.5, 1: 0.75, 2: 0.5, 3: 0.75, 4: 0.5, 5: 1.5, 6: 1.5}
+
+
+@functools.lru_cache(maxsize=None)
+def _low_plan(mode, hours=4.5, ctl=6.5, chronic=45.0, dmh=tuple(sorted(USER_DMH.items()))):
+    assert tp.clock.today() == MONDAY
+    goal = _goal(hours=hours, weeks=12, dmh=dict(dmh))
+    goal.plan_mode = mode
+    return tp.generate_plan(goal, athlete=ATHLETE, current_ctl=ctl,
+                            recent_weekly_tss=chronic)[1]
+
+
+@pytest.mark.parametrize("mode", ("auto", "fixed_core", "time_crunched"))
+def test_b6_budget_first_every_week_within_its_budget(mode):
+    """B6': every week of the low-fitness rider at most 1.05 x its budget and
+    under the ACWR danger line, in every mode the rider can pick."""
+    weeks = _low_plan(mode)
+    over = [(w.week_num, sum(s.tss_estimate or 0 for s in _rides(w)), w.tss_target)
+            for w in weeks if w.phase != "taper"
+            and sum(s.tss_estimate or 0 for s in _rides(w)) > 1.05 * w.tss_target + 1]
+    assert not over, over
+    assert not pi.check_acwr(weeks, 45.0, tolerance=1.0, limit=pi.ACWR_DANGER)
+
+
+def test_b6_budget_first_rides_shrink_before_z5_goes():
+    """B6': a tight budget keeps its Z5 day, shorter, and rides the rest at
+    tempo/sweetspot -- not two long sessions over the budget."""
+    for w in _low_plan("time_crunched")[:6]:
+        rides = _rides(w)
+        assert sum(1 for s in rides if tp._session_is_z5(s)) >= 1, w.week_num
+        assert {s.session_type for s in rides if not tp._session_is_z5(s)} <= {
+            "tempo", "sweetspot", "ftp_test"}, [(s.day, s.session_type) for s in rides]
+
+
+def test_b2_two_hours_rides_twice_with_a_z5_day():
+    """B2': 2 h a week over 5+ free days is at least two rides and one Z5
+    day every full week."""
+    for w in _low_plan("time_crunched", hours=2.0, ctl=40.0, chronic=280.0):
+        if (w.end - w.start).days < 6:
+            continue
+        rides = _rides(w)
+        assert len(rides) >= 2, (w.week_num, len(rides))
+        assert any(tp._session_is_z5(s) for s in rides), w.week_num
+
+
+def test_b2_more_shorter_rides_over_fewer_longer_ones():
+    """B2': a budget that holds six rides of 20+ minutes rides six days."""
+    layout = tp._tc_layout({o: 90 for o in range(7) if o != 0}, 300.0, 270.0,
+                           MONDAY, week_num=3)
+    assert len(layout) == 6 and all(m >= tp._RIDE_FLOOR_MIN for _t, m in layout.values())
+    assert sum(m for _t, m in layout.values()) <= 270
+
+
+def test_b9_the_budget_picks_the_intensity():
+    """B9: a tight budget rides tempo/sweetspot; one its minutes cannot hold
+    at that intensity climbs to threshold/over-unders."""
+    caps = {o: 45 for o in range(1, 7)}
+    low = tp._tc_layout(caps, 120.0, 270.0, MONDAY, week_num=1)
+    high = tp._tc_layout(caps, 380.0, 270.0, MONDAY, week_num=1)
+    assert {t for t, _m in low.values()} <= {"vo2max", "tempo", "sweetspot"}, low
+    assert {t for t, _m in high.values()} & {"threshold", "overunder"}, high
+
+
+def test_b9_the_non_z5_days_rotate():
+    """B9: the non-Z5 days of a week are not all one type, and no more than
+    three weeks in a row are the same week."""
+    caps = {o: 60 for o in range(1, 7)}
+    weeks = [tp._tc_layout(caps, 260.0, 270.0, MONDAY, week_num=n) for n in range(1, 9)]
+    for lay in weeks:
+        nz = [t for t, _m in lay.values() if t != "vo2max"]
+        assert len(set(nz)) >= 2, lay
+    shapes = [tuple(sorted(lay.items())) for lay in weeks]
+    assert not any(shapes[i] == shapes[i + 1] == shapes[i + 2] == shapes[i + 3]
+                   for i in range(len(shapes) - 3))
+
+
+def test_b2_the_z5_days_keep_off_last_weeks():
+    """B2: a Z5 day the Sunday before blocks Monday from being one."""
+    caps = {0: 60, 2: 60, 4: 60, 5: 60, 6: 60}
+    free = tp._tc_layout(caps, 300.0, 300.0, MONDAY, week_num=1)
+    # and never two Z5 days in a row within the week: Tue and Wed come first
+    # in the Z5 order, Tue and Fri is the answer.
+    two = tp._tc_layout({1: 60, 2: 60, 4: 60, 5: 60}, 300.0, 240.0, MONDAY, week_num=1)
+    assert sorted(o for o, (st, _m) in two.items() if st == "vo2max") == [1, 4], two
+    blocked = tp._tc_layout(caps, 300.0, 300.0, MONDAY, week_num=1,
+                            blocked={MONDAY - timedelta(days=1)})
+    assert free[0][0] == "vo2max"          # Monday would be a Z5 day ...
+    assert blocked[0][0] != "vo2max", blocked   # ... but not the day after one
+
+
+def test_b8_a_z5_slot_serves_z5_content():
+    """B8': every vo2max session is served a file whose content is Z5, no
+    other session one whose content is, and none an endurance file."""
+    plans = [_weeks("probe"), _weeks("6h"), _low_plan("time_crunched"),
+             _low_plan("time_crunched", hours=2.0, ctl=40.0, chronic=280.0)]
+    for weeks in plans:
+        for w in weeks:
+            for s in _rides(w):
+                if s.session_type == "ftp_test" or not _training(s):
+                    continue
+                cc = tp._content_class_for_zwo(s.zwo_file or "")
+                assert (s.session_type == "vo2max") == (cc in tp._Z5_CONTENT_CLASSES), (
+                    s.day, s.session_type, s.zwo_file, cc)
+                # ... and a Z3/Z4 day is not served an endurance file (B1).
+                assert cc not in tp._TC_EASY_CONTENT, (s.day, s.session_type, s.zwo_file, cc)
+
+
+def test_a7_the_eve_of_a_general_goal_stays_z3_plus(freeze_clock):
+    """A7: reforecast's eve guard eases the days before the target date with
+    a short tempo ride in a time-crunched plan, never endurance."""
+    goal = _goal(hours=3.0, weeks=12, goal_type="general")
+    weeks = tp.generate_plan(goal, athlete=ATHLETE, **PLANNER_PIN_ARGS)[1]
+    today = MONDAY + timedelta(days=16)
+    freeze_clock(today)
+    plan = {"goal": tp.goal_to_dict(goal), "weeks": [tp.week_to_dict(w) for w in weeks]}
+    plan, _n, _info = tp.reforecast_dict(plan, today_iso=today.isoformat())
+    _assert_crunched([tp.week_from_dict(w) for w in plan["weeks"]], today)
+
+
+def test_b7_a_refit_keeps_back_to_back_hard_days(freeze_clock):
+    """B7: refit of a six-ride week (hard days back to back by design) keeps
+    every remaining ride Z3+ and its two Z5 days: the 48 h easing, the HIT cap
+    and the re-owing passes are not the style's rules. The stored week's
+    remaining rides are a few minutes off what the builder lays out, so the
+    refit re-splices them."""
+    weeks = copy.deepcopy(_weeks("6h"))
+    wk = next(w for w in weeks if w.start >= MONDAY + timedelta(weeks=2)
+              and len(_rides(w)) >= 6)
+    first = min(_rides(wk), key=lambda s: s.day)
+    first.status = "missed"
+    today = first.day + timedelta(days=1)
+    for s in _rides(wk):
+        if s.day >= today:
+            s.duration_min += 3
+    freeze_clock(today)
+    _weeks_out, info = tp.refit_remaining_week(GOALS["6h"](), weeks, today)
+    assert info.get("refit_days"), info
+    _assert_crunched([wk], today)
+    left = sorted((s for s in _rides(wk) if s.day >= today), key=lambda s: s.day)
+    assert len(left) >= 4, [(s.day, s.session_type) for s in left]
+    assert any(b.day - a.day == timedelta(days=1) for a, b in zip(left, left[1:]))
+
+
+def _settle_week(types):
+    """A week Mon.. with ``types`` (None = rest), matched from the library."""
+    lib = tp.load_workout_library()
+    sessions = []
+    for i, st in enumerate(types):
+        d = MONDAY + timedelta(days=7 + i)
+        s = tp.PlannedSession(day=d, day_name=d.strftime("%a"), session_type="rest",
+                              duration_min=0, tss_estimate=0, description="")
+        if st:
+            s.duration_min, s.tss_estimate = 45, 60
+            tp._tc_retype(s, st, lib, "test")
+        sessions.append(s)
+    return lib, tp.PlannedWeek(week_num=2, start=MONDAY + timedelta(days=7),
+                               end=MONDAY + timedelta(days=13), phase="build1",
+                               tss_target=400.0, is_stepback=False, sessions=sessions)
+
+
+def test_b9_an_extra_z5_day_is_demoted_below_threshold():
+    """B2/B9: a third Z5 day in a four-ride week is demoted, to sweetspot or
+    tempo -- never to threshold by default."""
+    lib, week = _settle_week(["vo2max", None, "vo2max", None, "vo2max", "tempo", None])
+    tp._settle_time_crunched([week], lib)
+    rides = _rides(week)
+    assert sum(1 for s in rides if tp._session_is_z5(s)) == 2
+    assert {s.session_type for s in rides if not tp._session_is_z5(s)} <= {"tempo", "sweetspot"}
+
+
+def test_b5_a_week_ridden_every_day_gets_a_rest_day():
+    """B5: a rebuild that fills all seven days (a comeback ramp) leaves the
+    time-crunched week with a rest day."""
+    lib, week = _settle_week(["tempo", "vo2max", "tempo", "sweetspot", "vo2max",
+                              "tempo", "sweetspot"])
+    tp._settle_time_crunched([week], lib)
+    assert len(_rides(week)) == 6
+
+
+def test_b2_back_to_back_z5_days_are_split():
+    """B2: Z5 on Tuesday and Wednesday (a pass left them so) -- one of them
+    moves, the week keeps two Z5 days, never on consecutive days."""
+    lib, week = _settle_week(["tempo", "vo2max", "vo2max", "tempo", None, "sweetspot", None])
+    tp._settle_time_crunched([week], lib)
+    z5 = sorted(s.day for s in _rides(week) if tp._session_is_z5(s))
+    assert len(z5) == 2 and (z5[1] - z5[0]).days >= 2, z5

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import timedelta
-import math
 
 import pytest
 
@@ -106,27 +105,22 @@ def test_24_week_plan_uses_at_least_150_distinct_files(plan_24w_7day):
 
     Restated for MASTER_DECISIONS A3 (2026-11-18): per-day hours are caps and
     the phase's rest_days_per_week holds even when the rider lists no rest
-    day, so this "7-day" rider now rides at most 5 days a week and a 24-week
-    plan holds ~120 ride days, not 168. The old floors (145 sessions = 145/168
-    of the slots, 110 distinct files = 110/145 of the sessions) asked for 6+
-    rides a week, which the contract forbids. Both floors are now the SAME
-    ratios applied to the ride days the plan may hold (ride_day_caps).
+    day, so this "7-day" rider rides at most 5 days a week: a 24-week plan
+    holds ~120 ride days, not 168, and the old 145-session floor asked for
+    6+ rides a week, which the contract forbids. The floors are absolute
+    again (T1), re-measured the W8 way: the pinned plan (ctl=50,
+    weekly_tss=650, today=2026-01-05, seed_salt=12345) produces 116 sessions
+    and 111 distinct files on 2026-11-18; 110 and 100 are measured minus a
+    small margin, still a 2x improvement over the v4.4 baseline (51).
     """
     sessions = _all_sessions(plan_24w_7day)
     files = {s.zwo_file for s in sessions}
-    # Ride days the plan may hold: ride_day_caps, week by week (A3).
-    capacity = sum(len(tp.ride_day_caps(_build_goal(weeks=24, rest_days=[]),
-                                        w.start, w.end, w.phase))
-                   for w in plan_24w_7day)
-    need_sessions = math.ceil(capacity * 145 / 168)
-    need_files = math.ceil(len(sessions) * 110 / 145)
-    assert len(sessions) >= need_sessions, (
-        f"need ≥{need_sessions} sessions ({capacity} ride days × 145/168) for "
-        f"the diversification claim, got {len(sessions)}"
+    assert len(sessions) >= 110, (
+        f"need ≥110 sessions for the diversification claim, got {len(sessions)}"
     )
-    assert len(files) >= need_files, (
-        f"v4.5.0 acceptance: ≥{need_files} distinct ZWO files (110/145 of the "
-        f"sessions; was 51 in v4.4 baseline). Got {len(files)} of {len(sessions)} sessions."
+    assert len(files) >= 100, (
+        f"v4.5.0 acceptance: ≥100 distinct ZWO files (was 51 in v4.4 baseline). "
+        f"Got {len(files)} of {len(sessions)} sessions."
     )
 
 
