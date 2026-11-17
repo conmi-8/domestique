@@ -8982,7 +8982,7 @@ def _tc_retype(s, st: str, library, why: str, **match_kw) -> None:
 
 def _tc_layout(caps: dict, tss: float, minutes: float, start: date,
                week_num: int, blocked=(), fixed_rides: int = 0,
-               fixed_z5: int = 0) -> "dict[int, tuple[str, int]]":
+               fixed_z5: int = 0, may_rest: bool = False) -> "dict[int, tuple[str, int]]":
     """A time-crunched week laid out from its budget (B6', B2', B9):
     ``{offset: (session_type, minutes)}``.
 
@@ -8996,7 +8996,11 @@ def _tc_layout(caps: dict, tss: float, minutes: float, start: date,
     the week's own hard days); every ride grows from its floor by the same
     share of its room until the week holds its load or its minutes, the
     non-Z5 days on the tier the budget asks for (B9) and never past the load
-    (B6'). A budget one ride overshoots rides tempo, or rests."""
+    (B6'). A budget one ride overshoots rides tempo; one even a floor-length
+    tempo overshoots still rides that (A6': never a zero-ride week, or a
+    low-fitness plan's load -- and every later budget sized from it --
+    decays to nothing), unless the week already holds a ride or is the
+    plan's short last row (``may_rest``): then it rests."""
     lo = _RIDE_FLOOR_MIN
     if not caps or tss <= 0 or minutes < lo:
         return {}
@@ -9022,8 +9026,9 @@ def _tc_layout(caps: dict, tss: float, minutes: float, start: date,
         z5_lo = lo
     if n == 1 and kz and lo * r_z5 > _VOLUME_CEILING_TOLERANCE * tss:
         kz = 0                     # one short ride the budget holds: tempo
-    if n == 1 and not kz and lo * r_lo > _VOLUME_CEILING_TOLERANCE * tss:
-        return {}                  # not even that: the day rests
+    if (n == 1 and not kz and lo * r_lo > _VOLUME_CEILING_TOLERANCE * tss
+            and (may_rest or fixed_rides)):
+        return {}                  # the week rides already, or ends the plan
     order = sorted(caps, key=lambda o: (-caps[o], _RIDE_DAY_PREFERENCE.index(
         (start + timedelta(days=o)).weekday())))
     chosen: list = []
@@ -9112,7 +9117,10 @@ def time_crunched_week(ctx, state, budget=None) -> list["PlannedSession"]:
     if hpw > 0:
         minutes = min(minutes, hpw * 60 * span / 7)
     blocked = {s.day for s in (ctx.prev_week_sessions or []) if _session_is_z5(s)}
-    layout = _tc_layout(caps, full * span / 7, minutes, start, ctx.week_num, blocked)
+    last = (span < 7 and goal.target_date is not None
+            and row_end >= goal.target_date - timedelta(days=1))
+    layout = _tc_layout(caps, full * span / 7, minutes, start, ctx.week_num, blocked,
+                        may_rest=last)
     library = getattr(state, "library", None) or []
     used = getattr(state, "used_names", None)
     used_set = set(used or ())
@@ -9233,7 +9241,7 @@ def _settle_time_crunched(weeks: list, library: list | None = None,
 
 def _tc_hold_budget(goal, weeks: list, library: list | None = None,
                     overrides: "dict | None" = None, explicit=(),
-                    seed_salt: int = 0) -> set:
+                    seed_salt: int = 0, only=None) -> set:
     """B6'/B5/B10 on what the rider receives: every future week of a
     time-crunched plan whose rides are over 1.05 x its budget, ride all seven
     days, sit under 0.85 x a budget a fully future week could carry, or hold
@@ -9243,6 +9251,7 @@ def _tc_hold_budget(goal, weeks: list, library: list | None = None,
     change (done or pinned days, the race, an FTP test, an opener, a
     fatigue-eased day) is kept and counted; the day before an FTP test
     rests (B4); only the other days are laid out. Generation and reforecast both end with it.
+    ``only``: that one week is considered (the ACWR rail's re-lay, B12).
     Returns the iso days changed."""
     today = clock.today()
     overrides = overrides or {}
@@ -9270,12 +9279,14 @@ def _tc_hold_budget(goal, weeks: list, library: list | None = None,
                 and not getattr(x, "tsb_eased_from", None))
 
     prev_z5: set = set()
+    _last = max(weeks, key=lambda w: w.start) if weeks else None
     for w in sorted(weeks, key=lambda w: w.start):
         week_z5 = {x.day for x in (w.sessions or []) if _session_is_z5(x)}
         target = float(getattr(w, "tss_target", 0) or 0)
         days = (w.end - w.start).days + 1
         if (w.end < today or target <= 0 or days <= 0
-                or getattr(w, "phase", "") == "taper"):
+                or getattr(w, "phase", "") == "taper"
+                or (only is not None and w is not only)):
             prev_z5 = week_z5
             continue
         sessions = [x for x in (w.sessions or []) if x is not None]
@@ -9322,7 +9333,8 @@ def _tc_hold_budget(goal, weeks: list, library: list | None = None,
                              if _session_is_z5(x) or x.session_type == "ftp_test"}
         layout = _tc_layout(caps, target - f_load, minutes, w.start, w.week_num,
                             blocked, fixed_rides=len(fixed),
-                            fixed_z5=sum(1 for x in fixed if _session_is_z5(x)))
+                            fixed_z5=sum(1 for x in fixed if _session_is_z5(x)),
+                            may_rest=days < 7 and w is _last)
         new_load = f_load + sum(m * TSS_PER_HOUR[st] / 60 for st, m in layout.values())
         if under and not (forced or over or no_rest) and (
                 new_load < load + max(5.0, 0.05 * target)):
@@ -10095,8 +10107,15 @@ def generate_plan(
     # trimmed build week must not end up under its deload) and again after
     # it (a deload it lightens lowers the load carried into the next week).
     _acwr_rail = not acwr_cap_off_until()
+    _relay = None
+    if _is_time_crunched(goal):
+        def _relay(w):
+            # B12: the week the rail cuts is laid out again from its allowance.
+            _tc_hold_budget(goal, weeks, library, overrides=_avail,
+                            seed_salt=seed_salt, only=w)
     if _acwr_rail:
-        _hold_acwr_on_plan(weeks, _carried0, crunched=_is_time_crunched(goal))
+        _hold_acwr_on_plan(weeks, _carried0, crunched=_is_time_crunched(goal),
+                           relay=_relay)
 
     # B3 — guarantee each step-back week is the lightest in its block. Runs LAST,
     # after the per-day clamp above could have trimmed a build week below the
@@ -10104,7 +10123,8 @@ def generate_plan(
     # rhythm. Only shrinks easy volume in the deload; never touches build weeks.
     _enforce_stepback_is_lightest(weeks)
     if _acwr_rail:
-        _hold_acwr_on_plan(weeks, _carried0, crunched=_is_time_crunched(goal))
+        _hold_acwr_on_plan(weeks, _carried0, crunched=_is_time_crunched(goal),
+                           relay=_relay)
 
     # PART B (B-LOCKED-4): backdated entry — ELAPSED weeks stay as rows
     # (week_num/tss_target kept: the planned-CTL annotators + position math
@@ -11254,7 +11274,8 @@ def _enforce_weekly_volume_ceiling(weeks: list, taper_only: bool = False,
             slot.zwo_name = ""
 
 
-def _hold_acwr_on_plan(weeks: list, chronic: float, crunched: bool = False) -> None:
+def _hold_acwr_on_plan(weeks: list, chronic: float, crunched: bool = False,
+                       relay=None) -> None:
     """The ACWR rail on the plan the rider receives (B6/B6'): no week over
     ACWR_CEILING x the load carried into it, the load carried following the
     plan's own FINAL weeks from ``chronic`` (plan_invariants.chronic_after).
@@ -11266,7 +11287,9 @@ def _hold_acwr_on_plan(weeks: list, chronic: float, crunched: bool = False) -> N
     rider was actually given. An over week is trimmed the volume pass's way
     (easy volume first, key work shortened, never dropped), against its
     ACWR allowance instead of its budget. The taper and past weeks only carry
-    the load forward."""
+    the load forward. ``relay(week)`` (time-crunched, B12) lays an over week
+    out again from the allowance (set as its target) instead, so it keeps
+    B2's ride/Z5 shape; the trim only takes what that left over."""
     carried = float(chronic or 0)
     today = clock.today()
     for w in sorted(weeks, key=lambda w: w.start):
@@ -11287,7 +11310,10 @@ def _hold_acwr_on_plan(weeks: list, chronic: float, crunched: bool = False) -> N
             target = w.tss_target
             w.tss_target = allowed
             try:
-                _enforce_weekly_volume_ceiling([w], crunched=crunched)
+                if relay is not None:
+                    relay(w)
+                if _load() > allowed * _VOLUME_CEILING_TOLERANCE:
+                    _enforce_weekly_volume_ceiling([w], crunched=crunched)
             finally:
                 w.tss_target = target
         carried = chronic_after(carried, _load() * 7 / days, days)

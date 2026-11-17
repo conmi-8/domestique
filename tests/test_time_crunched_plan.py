@@ -610,3 +610,101 @@ def test_b6_the_acwr_rail_holds_a_time_crunched_week():
     tp._hold_acwr_on_plan([week], 100.0, crunched=True)
     assert _tss(week) <= 1.3 * 100 * 1.05 + 1, [(s.session_type, s.duration_min) for s in _rides(week)]
     assert sum(1 for s in _rides(week) if s.session_type == "vo2max") == 2
+
+
+# ── After QA3: the floor ride (A6'), rest days after an edit (B11), B2 after
+# the rails (B12), the week's budget at the builder (T3) ────────────────────
+def _real_goal(start, weeks=12, **kw):
+    base = dict(goal_type="ftp", target_date=start + timedelta(weeks=weeks),
+                hours_per_week=4.5, max_weekday_hours=0.75, max_weekend_hours=1.5,
+                available_days=list(range(7)), rest_days=[], plan_mode="time_crunched")
+    base.update(kw)
+    return tp.Goal(**base)
+
+
+@pytest.mark.parametrize("ctl", (1.0, 2.0, 3.0))
+def test_a6p_a_low_fitness_plan_rides_every_week_and_builds(ctl, freeze_clock):
+    """A6': at CTL 1-3 (a returning rider) even a 20-min tempo is over 1.05 x
+    the first budgets. The week rides it anyway -- never a zero-ride week --
+    and the budgets after it build instead of decaying to nothing (QA3 X1:
+    0 rides in all 13 rows, targets 19 -> 0)."""
+    start = date(2026, 11, 18)
+    freeze_clock(start)
+    weeks = tp.generate_plan(_real_goal(start), athlete=ATHLETE, current_ctl=ctl,
+                             recent_weekly_tss=ctl * 7)[1]
+    rows = [(w.week_num, (w.end - w.start).days + 1, len(_rides(w)), round(w.tss_target))
+            for w in weeks]
+    assert not [r for r in rows[:-1] if r[2] == 0], rows
+    full = [r for r in rows if r[1] == 7]
+    assert max(r[3] for r in full) >= 2 * full[0][3], rows
+
+
+def test_a6p_the_layout_rides_its_floor_unless_the_week_rides_already():
+    """A6' at the source: a budget a 20-min tempo overshoots still rides it;
+    a week already holding a ride (an FTP test), or the plan's short last
+    row, rests instead."""
+    caps = {1: 45, 5: 90}
+    assert tp._tc_layout(caps, 8.0, 135.0, MONDAY, week_num=1) == {5: ("tempo", 20)}
+    assert tp._tc_layout(caps, 8.0, 135.0, MONDAY, week_num=1, fixed_rides=1) == {}
+    assert tp._tc_layout(caps, 8.0, 135.0, MONDAY, week_num=1, may_rest=True) == {}
+
+
+def test_b11_rider_rest_days_stay_rest_after_an_edit(freeze_clock):
+    """B11: the rider's own rest weekdays (Mon, Fri) are never ridden after
+    a reforecast re-lays the edited weeks -- only a rest day the rider set
+    hours on rides."""
+    goal = _real_goal(MONDAY, weeks=10, available_days=[1, 2, 3, 5, 6], rest_days=[0, 4])
+    weeks = tp.generate_plan(goal, athlete=ATHLETE, current_ctl=30.0,
+                             recent_weekly_tss=210.0)[1]
+    today = MONDAY + timedelta(days=16)
+    freeze_clock(today)
+    days = [(today + timedelta(days=i)).isoformat() for i in range(1, 8)
+            if (today + timedelta(days=i)).weekday() not in (0, 4)]
+    plan = {"goal": tp.goal_to_dict(goal), "weeks": [tp.week_to_dict(w) for w in weeks]}
+    plan, _n, _info = tp.reforecast_dict(plan, today_iso=today.isoformat(),
+                                         availability_overrides={d: 1.5 for d in days},
+                                         explicit_days=set(days))
+    weeks = [tp.week_from_dict(w) for w in plan["weeks"]]
+    ridden = [(s.day, s.session_type) for w in weeks for s in _rides(w)
+              if s.day > today and s.day.weekday() in (0, 4) and _training(s)]
+    assert not ridden, ridden
+    assert any(_rides(w) for w in weeks if w.start > today)
+
+
+def test_b12_b2_holds_after_the_acwr_rail(freeze_clock):
+    """B12: a week the ACWR rail cuts (here after a one-ride FTP-test week:
+    2 h, 1.5/2.5 h caps, CTL 6.5) is laid out again from its allowance, so
+    it still rides 1 Z5 in 2-3 rides and 2 in 4+ (QA3 S3: vo2, vo2, tempo)."""
+    start = date(2026, 11, 18)
+    freeze_clock(start)
+    goal = _real_goal(start, weeks=8, hours_per_week=2.0, max_weekday_hours=1.5,
+                      max_weekend_hours=2.5)
+    weeks = tp.generate_plan(goal, athlete=ATHLETE, current_ctl=6.5,
+                             recent_weekly_tss=45.5)[1]
+    wrong = []
+    for w in _rows(weeks):
+        rides = [s for s in _rides(w) if _training(s)]
+        want = 2 if len(rides) >= 4 else 1 if len(rides) >= 2 else None
+        got = sum(1 for s in rides if tp._session_is_z5(s))
+        if want is not None and got != want:
+            wrong.append((w.week_num, [(s.session_type, s.duration_min) for s in rides]))
+    assert not wrong, wrong
+    assert not pi.check_acwr(weeks, 45.5)
+
+
+def test_t3_the_builder_lays_out_the_budget_it_is_given():
+    """T3/B10: the builder (through propose_week) sizes the week from the
+    budget it is handed -- net of rides done, so not ctx.tss_target -- and
+    not from the context's gross target."""
+    from types import SimpleNamespace
+    goal = _goal()
+    phase = tp.Phase(name="build1", start=MONDAY, end=MONDAY + timedelta(days=6),
+                     weeks=1, focus="", weekly_tss_target=300, z2_pct=80,
+                     hit_per_week=2, session_types=[])
+    ctx = tp.week_context(goal, phase, 3, MONDAY, is_stepback=False, week_in_phase=0,
+                          tss_target=300.0)
+    state = tp.week_plan.PlanState(library=tp.load_workout_library())
+    for out in (tp.propose_week(ctx, state, SimpleNamespace(tss_per_week=60)),
+                tp.time_crunched_week(ctx, state, SimpleNamespace(tss_per_week=60))):
+        load = sum(float(s.tss_estimate or 0) for s in out if s.session_type != "rest")
+        assert 0.85 * 60 <= load <= 1.05 * 60 + 0.5, [(s.session_type, s.duration_min) for s in out]
