@@ -109,9 +109,10 @@ def test_24_week_plan_uses_at_least_150_distinct_files(plan_24w_7day):
     holds ~120 ride days, not 168, and the old 145-session floor asked for
     6+ rides a week, which the contract forbids. The floors are absolute
     again (T1), re-measured the W8 way: the pinned plan (ctl=50,
-    weekly_tss=650, today=2026-01-05, seed_salt=12345) produces 116 sessions
-    and 111 distinct files on 2026-11-18; 110 and 100 are measured minus a
-    small margin, still a 2x improvement over the v4.4 baseline (51).
+    weekly_tss=650, today=2026-01-05, seed_salt=12345) produces 114 sessions
+    and 104 distinct files on 2026-11-18 (re-measured after QA2); 110 and 100
+    are that minus a small margin, still a 2x improvement over the v4.4
+    baseline (51).
     """
     sessions = _all_sessions(plan_24w_7day)
     files = {s.zwo_file for s in sessions}

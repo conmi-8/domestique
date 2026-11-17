@@ -442,3 +442,171 @@ def test_b2_back_to_back_z5_days_are_split():
     tp._settle_time_crunched([week], lib)
     z5 = sorted(s.day for s in _rides(week) if tp._session_is_z5(s))
     assert len(z5) == 2 and (z5[1] - z5[0]).days >= 2, z5
+
+
+# ── After QA2: the edit settle (A7'), the budget from below (B10), more rides
+# (B2''), VO2 content (B8''), the FTP rest day and the last row (T2) ────────
+def _rows(weeks, since=None):
+    return [w for w in weeks if w.tss_target and w.phase != "taper"
+            and (since is None or w.end >= since)]
+
+
+def _tss(w):
+    return sum(float(s.tss_estimate or 0) for s in _rides(w))
+
+
+EDIT_CASES = {
+    # rider, goal, CTL, chronic: QA2's rf2.py (user65 broke B6' x4.3, ev6 B5)
+    "user65": (dict(hours=4.5, dmh=USER_DMH), 6.5, 45.0),
+    "ev6": (dict(hours=6.0, goal_type="event", event_km=100.0, event_climb_m=1000.0,
+                 event_name="ev", dmh={d: 1.5 for d in range(7)}), 40.0, 280.0),
+}
+
+
+@pytest.mark.parametrize("case", EDIT_CASES)
+def test_a7p_an_availability_edit_is_settled_like_generation(case, freeze_clock):
+    """A7': the rider sets 1.5 h on each of the next seven days. Those hours
+    are caps, and every future week comes out of the same budget-first settle
+    as generation: at most 1.05 x its budget, a rest day (B5), two Z5 days
+    never back to back in a week of four or more rides (B2), the ACWR danger
+    line not crossed."""
+    kw, ctl, chronic = EDIT_CASES[case]
+    goal = _goal(weeks=12, **kw)
+    weeks = tp.generate_plan(goal, athlete=ATHLETE, current_ctl=ctl,
+                             recent_weekly_tss=chronic)[1]
+    today = MONDAY + timedelta(days=16)
+    freeze_clock(today)
+    days = [(today + timedelta(days=i)).isoformat() for i in range(1, 8)]
+    plan = {"goal": tp.goal_to_dict(goal), "weeks": [tp.week_to_dict(w) for w in weeks]}
+    plan, _n, _info = tp.reforecast_dict(plan, today_iso=today.isoformat(),
+                                         availability_overrides={d: 1.5 for d in days},
+                                         explicit_days=set(days))
+    assert plan["goal"]["plan_mode"] == "time_crunched"
+    weeks = [tp.week_from_dict(w) for w in plan["weeks"]]
+    for w in _rows(weeks, since=today):
+        rides = _rides(w)
+        shape = [(s.day, s.session_type, s.duration_min, s.tss_estimate) for s in rides]
+        assert _tss(w) <= 1.05 * w.tss_target + 1, (w.week_num, w.tss_target, shape)
+        if (w.end - w.start).days + 1 == 7:
+            assert len(rides) <= 6, (w.week_num, shape)
+        z5 = sorted(s.day for s in rides if tp._session_is_z5(s))
+        if len(rides) >= 4:
+            assert len(z5) == 2, (w.week_num, shape)
+        assert all((b - a).days >= 2 for a, b in zip(z5, z5[1:])), (w.week_num, shape)
+        assert not [s for s in rides if s.session_type in EASY and _training(s)], shape
+    assert not pi.check_acwr(weeks, chronic, tolerance=1.0, limit=pi.ACWR_DANGER)
+
+
+def test_b10_the_users_weeks_reach_their_budget(freeze_clock):
+    """B10: the rider's real plan (QA2 real.py: from Wednesday 2026-11-18,
+    0.75 h weekdays, 1.5 h weekends, 4.5 h, CTL 6.5) and the low-fitness
+    plan above deliver at least 0.85 x every full week's budget -- the FTP
+    test week included, whose test outgrew its day and shed a ride -- and no
+    row (the last two-day one included, T2) more than 1.05 x."""
+    start = date(2026, 11, 18)
+    freeze_clock(start)
+    goal = tp.Goal(goal_type="ftp", target_date=start + timedelta(weeks=12),
+                   hours_per_week=4.5, max_weekday_hours=0.75, max_weekend_hours=1.5,
+                   available_days=list(range(7)), rest_days=[], plan_mode="time_crunched")
+    real = tp.generate_plan(goal, athlete=ATHLETE, current_ctl=6.5, recent_weekly_tss=45.0)[1]
+    freeze_clock(MONDAY)
+    for weeks in (real, _low_plan("time_crunched")):
+        rows = [(w.week_num, (w.end - w.start).days + 1, round(_tss(w)), round(w.tss_target))
+                for w in _rows(weeks)]
+        assert not [r for r in rows if r[1] == 7 and r[2] < 0.85 * r[3]], rows
+        assert not [r for r in rows if r[2] > 1.05 * r[3] + 0.5], rows
+        assert any(s.session_type == "ftp_test" for w in weeks for s in w.sessions)
+
+
+def test_b6p_the_layout_never_lays_out_more_than_its_load():
+    """B6': whatever the budget, the builder's own week carries no more than
+    1.05 x it (not trimmed back by a later rail)."""
+    caps = {o: 90 for o in range(1, 7)}
+    for tss in range(25, 420, 15):
+        layout = tp._tc_layout(caps, float(tss), 270.0, MONDAY, week_num=2)
+        got = sum(m * tp.TSS_PER_HOUR[t] / 60 for t, m in layout.values())
+        assert layout and got <= 1.05 * tss + 0.5, (tss, got, layout)
+
+
+def test_b2pp_a_third_and_fourth_ride_beat_a_longer_z5():
+    """B2'': the 3rd/4th ride of 20+ minutes is added when it fits, the Z5
+    ride shortened toward 20 minutes: QA2's weeks 3 (70 TSS) and 6 (96)."""
+    caps = {1: 45, 2: 45, 3: 45, 4: 45, 5: 90, 6: 90}
+    three = tp._tc_layout(caps, 70.0, 270.0, MONDAY, week_num=3)
+    four = tp._tc_layout(caps, 96.0, 270.0, MONDAY, week_num=6)
+    assert len(three) == 3 and [t for t, _m in three.values()].count("vo2max") == 1, three
+    assert len(four) == 4 and [t for t, _m in four.values()].count("vo2max") == 2, four
+    assert all(m >= tp._RIDE_FLOOR_MIN for _t, m in {**three, **four}.values())
+
+
+def test_b2pp_a_z5_ride_starts_at_30_minutes_when_no_ride_is_lost():
+    """B2'': where the budget holds the same rides with 30-minute Z5 days,
+    they are 30 minutes; the library's Z5 files are mostly 25-35."""
+    layout = tp._tc_layout({1: 45, 3: 45, 5: 45, 6: 45}, 125.0, 180.0, MONDAY, week_num=1)
+    z5 = [m for t, m in layout.values() if t == "vo2max"]
+    assert len(layout) == 4 and len(z5) == 2 and min(z5) >= tp._TC_Z5_MIN, layout
+
+
+def test_b8pp_a_vo2max_slot_is_served_vo2_content():
+    """B8'': every vo2max session is VO2 work (vo2max, ladder, short
+    intervals), not the anaerobic/neuromuscular files."""
+    for weeks in (_weeks("probe"), _weeks("6h"), _low_plan("time_crunched")):
+        bad = [(s.day, s.zwo_file) for w in weeks for s in _rides(w)
+               if s.session_type == "vo2max"
+               and tp._content_class_for_zwo(s.zwo_file or "") not in tp._VO2_CONTENT_CLASSES]
+        assert not bad, bad
+
+
+def test_b8pp_anaerobic_files_serve_only_when_no_vo2_file_does():
+    """B8'/B8'': with no VO2 file in the library a vo2max slot falls back to
+    the other Z5 files -- never to a Z3/Z4 one."""
+    lib = tp.load_workout_library()
+    by_cc = {}
+    for r in lib:
+        by_cc.setdefault(tp._content_class_for_zwo(r.get("File") or ""), r)
+    small = [by_cc["anaerobic"], by_cc["sweet_spot"], by_cc["tempo"]]
+    assert tp._tc_library(small, True) == [by_cc["anaerobic"]]
+    assert tp._tc_library(small + [by_cc["vo2max"]], True) == [by_cc["vo2max"]]
+
+
+def test_b4_the_settle_rests_the_day_before_an_ftp_test():
+    """B4: a ride the day before an FTP test (an edit put it there) rests;
+    the test is not ridden on tired legs."""
+    lib, week = _settle_week(["tempo", "sweetspot", None, "tempo", None, "tempo", None])
+    week.sessions[2].session_type = "ftp_test"
+    week.sessions[2].duration_min, week.sessions[2].tss_estimate = 45, 52
+    tp._settle_time_crunched([week], lib)
+    assert week.sessions[1].session_type == "rest"
+    assert week.sessions[2].session_type == "ftp_test"
+
+
+def test_b6p_the_builder_alone_is_budget_first(monkeypatch):
+    """B6'/B10 at the source: with the final re-layout and the minute hold
+    switched off, the week builder still lays every full week before the
+    FTP test at 0.85-1.05 x its budget and within hours_per_week -- it reads
+    the week's budget and minutes, not the phase label."""
+    monkeypatch.setattr(tp, "_tc_hold_budget", lambda *a, **k: set())
+    monkeypatch.setattr(tp, "hold_week_minutes", lambda *a, **k: None)
+    goal = _goal(hours=4.5, weeks=12, dmh=USER_DMH)
+    weeks = tp.generate_plan(goal, athlete=ATHLETE, current_ctl=6.5,
+                             recent_weekly_tss=45.0)[1]
+    rows = []
+    for w in weeks:
+        if any(s.session_type == "ftp_test" for s in w.sessions):
+            break
+        if (w.end - w.start).days + 1 == 7:
+            rows.append((w.week_num, round(_tss(w)), round(w.tss_target),
+                         sum(s.duration_min for s in _rides(w))))
+    assert len(rows) >= 4, rows
+    assert all(0.85 * t <= got <= 1.05 * t + 0.5 and m <= 270 for _n, got, t, m in rows), rows
+
+
+def test_b6_the_acwr_rail_holds_a_time_crunched_week():
+    """B6: the final-plan ACWR rail trims a time-crunched week over 1.3 x the
+    load carried, its Z5 days shortened, not dropped."""
+    lib, week = _settle_week(["tempo", "vo2max", "sweetspot", None, "vo2max", "tempo", None])
+    for s in _rides(week):
+        s.duration_min, s.tss_estimate = 60, 80
+    tp._hold_acwr_on_plan([week], 100.0, crunched=True)
+    assert _tss(week) <= 1.3 * 100 * 1.05 + 1, [(s.session_type, s.duration_min) for s in _rides(week)]
+    assert sum(1 for s in _rides(week) if s.session_type == "vo2max") == 2
