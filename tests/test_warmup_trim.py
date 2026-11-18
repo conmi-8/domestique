@@ -834,3 +834,26 @@ def test_the_workout_view_shows_the_trimmed_warmup(stub):
     test = stub.client.get(f"/api/workout/all/{RAMP_TEST}").json()
     assert test["warmup_trimmed"] is False
     assert (stub.workouts / WARMUP_EL).read_bytes() == stub.disk[WARMUP_EL]
+
+
+def test_the_planner_matches_files_by_their_trimmed_length(stub, monkeypatch):
+    """With Max warm-up set, the planner's library carries each file's trimmed
+    duration/TSS, so a slot is filled by what is actually ridden. Tests keep
+    their protocol warm-up; off = the rows as before."""
+    monkeypatch.setattr(tp, "WORKOUT_DIR", stub.workouts)
+    monkeypatch.setattr(tp, "EXTRA_WORKOUT_DIR", None)
+    monkeypatch.setattr(tp, "warmup_max_provider", lambda: None)
+    off = {r["File"]: r for r in tp.load_workout_library()}
+    monkeypatch.setattr(tp, "warmup_max_provider", lambda: 2)
+    on = {r["File"]: r for r in tp.load_workout_library()}
+    assert on[WARMUP_EL]["Duration(min)"] < off[WARMUP_EL]["Duration(min)"]
+    assert on[WARMUP_EL]["TSS"] < off[WARMUP_EL]["TSS"]
+    assert on[RAMP_TEST] == off[RAMP_TEST]
+    assert (stub.workouts / WARMUP_EL).read_bytes() == stub.disk[WARMUP_EL]
+
+
+def test_app_wires_the_setting_into_the_planner(stub):
+    assert tp.warmup_max_provider is not None
+    assert tp.warmup_max_provider() is None
+    assert _set(stub, 4).status_code == 200
+    assert tp.warmup_max_provider() == 4

@@ -71,6 +71,20 @@ import config
 import db
 import zones as _zones_mod
 import training_planner as tp  # module-level: every plan endpoint uses tp.plan_write_lock()
+
+
+def _warmup_max_for_planner():
+    """Settings -> Max warm-up of the active profile, for the planner's
+    library (files are matched by their trimmed length)."""
+    try:
+        import warmup_trim
+        from profile_manager import ProfileManager
+        return warmup_trim.setting(ProfileManager.get())
+    except Exception:
+        return None
+
+
+tp.warmup_max_provider = _warmup_max_for_planner
 import continuous_policy as cpol  # 3.4.0 W2 — continuous-mode deload + rotation policy
 # v1.6.1 — register _log_error as the planner's observability hook so any
 # planner-internal failure (generate_plan phase build, reforecast, match_zwo

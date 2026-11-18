@@ -5038,6 +5038,52 @@ def _np_fraction_from_samples(samples: "list[float]") -> float:
 
 
 def load_workout_library() -> list[dict]:
+    """The workout library as the rider will ride it: _load_library_rows with
+    Settings -> Max warm-up applied to each file's duration and TSS, so a slot
+    is filled by the workout's TRIMMED length (a 35-min slot no longer gets a
+    34-min file that rides as 27 min)."""
+    rows = _load_library_rows()
+    limit = warmup_max_provider() if warmup_max_provider else None
+    if limit is None:
+        return rows
+    key = (id(rows), limit)
+    hit = _WARMUP_LIB_CACHE.get(key)
+    if hit is not None and hit[0] is rows:
+        return hit[1]
+    import warmup_trim
+    out = []
+    for r in rows:
+        fname = r.get("File") or ""
+        try:
+            path = _facts_dir_for(fname) / fname
+            text = path.read_text(encoding="utf-8")
+            if warmup_trim.is_protocol_test(fname, "", text):
+                out.append(r)
+                continue
+            _, info = warmup_trim.trim_zwo_text(text, limit)
+        except (OSError, UnicodeDecodeError):
+            info = None
+        if info is None:
+            out.append(r)
+            continue
+        cut_s = info["orig_s"] - info["new_s"]
+        r2 = dict(r)
+        r2["Duration(min)"] = round(info["new_s"] / 60, 1)
+        # ponytail: the removed warm-up is costed at IF 0.6 (36 TSS/h); exact
+        # would re-sum the trimmed file's power, not worth a second parse.
+        r2["TSS"] = max(0.0, round(float(r.get("TSS") or 0) - cut_s / 3600 * 36, 1))
+        out.append(r2)
+    _WARMUP_LIB_CACHE.clear()
+    _WARMUP_LIB_CACHE[key] = (rows, out)
+    return out
+
+
+# Set by app.py: () -> the profile's Max warm-up minutes, or None (off).
+warmup_max_provider = None
+_WARMUP_LIB_CACHE: dict = {}
+
+
+def _load_library_rows() -> list[dict]:
     """The workout library: every workout of the built-in library (WORKOUT_DIR)
     plus those in the rider's extra folder (EXTRA_WORKOUT_DIR, 3.13.1) that the
     built-in one does not have by file name. Rows as _load_library_dir."""
