@@ -733,3 +733,23 @@ def test_the_dense_filter_drops_a_mostly_easy_file():
     # the trimmed warm-up raises the share of what is ridden
     trimmed = dict(easy, **{"Duration(min)": 20, "FullDuration(min)": 30})
     assert tp._tc_share(trimmed, (3, 4, 5, 6)) == pytest.approx(0.33 * 1.5)
+
+
+@pytest.mark.parametrize("limit", [0, 1, 2, 3])
+def test_the_weekday_ride_limit_holds(limit, freeze_clock):
+    """Max weekday rides: never more rides Mon-Fri than the rider allows; the
+    week's load goes to the weekend / fewer longer rides instead."""
+    freeze_clock(MONDAY)
+    g = _goal(hours=6.75, weeks=12, max_weekday_rides=limit)
+    _, weeks = tp.generate_plan(g, athlete=ATHLETE, **PLANNER_PIN_ARGS)
+    for w in weeks:
+        wd = [s for s in _rides(w) if s.day.weekday() < 5]
+        assert len(wd) <= limit, (w.week_num, [str(s.day) for s in wd])
+    assert any(_rides(w) for w in weeks)
+
+
+def test_the_weekday_ride_limit_round_trips():
+    g = _goal(max_weekday_rides=2)
+    assert tp.goal_from_dict(tp.goal_to_dict(g)).max_weekday_rides == 2
+    assert tp.goal_from_dict(dict(tp.goal_to_dict(g), max_weekday_rides="")).max_weekday_rides is None
+    assert tp.goal_from_dict(dict(tp.goal_to_dict(g), max_weekday_rides=9)).max_weekday_rides is None

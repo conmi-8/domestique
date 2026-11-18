@@ -11685,6 +11685,7 @@ async def api_plan_generate(request: Request):
             vo2_microintervals_only=bool(body.get(
                 "vo2_microintervals_only",
                 _prefs.get("vo2_microintervals_only", False))),
+            max_weekday_rides=tp._weekday_rides_or_none(body.get("max_weekday_rides")),
             events=_events_from_dicts(body.get("events")),  # F7 (A + optional B/C)
             # FS1 — plan construction mode (auto | fixed_core | template).
             # v2.3.0: a custom-bands payload drives the dynamic custom blueprint,

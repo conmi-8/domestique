@@ -2307,6 +2307,10 @@ window.addEventListener('unhandledrejection', function(e) {
             <option value="time_crunched">Time-crunched (short &amp; hard)</option>
           </select>
         </div>
+        <div class="form-group" id="plan-weekday-rides-group" style="display:none;"><label for="plan-max-weekday-rides">Max weekday rides
+          <span class="hint" title="Time-crunched: at most this many rides Monday to Friday. The weekend is not limited; the week's load goes to fewer, longer rides. Empty = no limit.">?</span></label>
+          <input type="number" id="plan-max-weekday-rides" min="0" max="5" step="1" placeholder="no limit" style="width:90px;" onchange="refreshPlanPreview()">
+        </div>
         <div class="form-group" id="plan-template-group" style="display:none;"><label>Template</label>
           <select id="plan-template" onchange="onTemplateChange()">
             <option value="polarized_base">Polarized Base</option>
@@ -12124,6 +12128,8 @@ function onPlanModeChange() {
   const mode = ($('plan-mode') || {}).value || 'auto';
   const grp = $('plan-template-group');
   if (grp) grp.style.display = (mode === 'template') ? '' : 'none';
+  const wr = $('plan-weekday-rides-group');
+  if (wr) wr.style.display = (mode === 'time_crunched') ? '' : 'none';
   onTemplateChange();  // readout + custom editor follow mode+template (also refreshes the preview)
 }
 
@@ -13024,6 +13030,8 @@ async function generatePlan(opts) {
     distribution: ($('plan-distribution') || {}).value || 'polarized',  // J1
     block_periodization: (($('plan-block-periodization') || {}).checked) || false,  // F1
     vo2_microintervals_only: (($('plan-vo2-micro-only') || {}).checked) || false,
+    max_weekday_rides: ((($('plan-max-weekday-rides') || {}).value || '') === '')
+      ? null : parseInt($('plan-max-weekday-rides').value, 10),
     plan_mode: ($('plan-mode') || {}).value || 'auto',  // FS1
     template_id: (($('plan-mode') || {}).value === 'template')
       ? (($('plan-template') || {}).value || '') : '',  // FS1
@@ -15628,6 +15636,8 @@ function populatePlanFormFromGoal(goal) {
   const bp = $('plan-block-periodization'); if (bp) bp.checked = !!goal.block_periodization;
   const vm = $('plan-vo2-micro-only'); if (vm) vm.checked = !!goal.vo2_microintervals_only;
   setVal('plan-mode', goal.plan_mode || 'auto');
+  { const mw = $('plan-max-weekday-rides'); if (mw) mw.value = goal.max_weekday_rides != null ? String(goal.max_weekday_rides) : ''; }
+  { const wr = $('plan-weekday-rides-group'); if (wr) wr.style.display = (goal.plan_mode === 'time_crunched') ? '' : 'none'; }
   if (goal.template_id) setVal('plan-template', goal.template_id);
   // v2.3.0: a custom plan round-trips as template_id=custom — present it as
   // Plan style → Template → Custom and restore the split.
@@ -15681,6 +15691,7 @@ function populatePlanFormFromGoal(goal) {
     if (goal.hours_per_week) parts.push(goal.hours_per_week + 'h/wk');
     if (goal.block_periodization) parts.push('Block periodization');
     if (goal.vo2_microintervals_only) parts.push('VO2max: microintervals only');
+    if (goal.plan_mode === 'time_crunched' && goal.max_weekday_rides != null) parts.push('≤' + goal.max_weekday_rides + ' weekday rides');
     if (goal.plan_mode === 'template' && goal.template_id) parts.push(String(goal.template_id).replace(/_/g, ' '));
     const races = (goal.events || []).filter(e => e && e.priority && e.priority !== 'A').length;
     if (races) parts.push(races + ' race' + (races > 1 ? 's' : ''));

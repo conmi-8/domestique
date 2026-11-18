@@ -1998,6 +1998,9 @@ class Goal:
     # a plan that cannot fill a day is worse than one that fills it with a
     # long interval.
     vo2_microintervals_only: bool = False
+    # Time-crunched: at most this many rides Mon-Fri (None = no limit). The
+    # weekend is not limited; the week's budget goes to fewer, longer rides.
+    max_weekday_rides: int | None = None
 
     def max_hours_for_day(self, weekday: int) -> float:
         """Get max training hours for a specific weekday (0=Mon..6=Sun)."""
@@ -9088,7 +9091,8 @@ def _tc_retype(s, st: str, library, why: str, **match_kw) -> None:
 
 def _tc_layout(caps: dict, tss: float, minutes: float, start: date,
                week_num: int, blocked=(), fixed_rides: int = 0,
-               fixed_z5: int = 0, may_rest: bool = False) -> "dict[int, tuple[str, int]]":
+               fixed_z5: int = 0, may_rest: bool = False,
+               max_weekday=None) -> "dict[int, tuple[str, int]]":
     """A time-crunched week laid out from its budget (B6', B2', B9):
     ``{offset: (session_type, minutes)}``.
 
@@ -9108,6 +9112,12 @@ def _tc_layout(caps: dict, tss: float, minutes: float, start: date,
     decays to nothing), unless the week already holds a ride or is the
     plan's short last row (``may_rest``): then it rests."""
     lo = _RIDE_FLOOR_MIN
+    if max_weekday is not None:
+        # The rider's weekday limit: the longest weekday caps stay.
+        wd = sorted((o for o in caps if (start + timedelta(days=o)).weekday() < 5),
+                    key=lambda o: (-caps[o], o))
+        caps = {o: c for o, c in caps.items() if o not in wd[max_weekday:]}
+        minutes = min(minutes, sum(caps.values()))
     if not caps or tss <= 0 or minutes < lo:
         return {}
     r_z5, r_lo = TSS_PER_HOUR["vo2max"] / 60, TSS_PER_HOUR["tempo"] / 60
@@ -9226,7 +9236,8 @@ def time_crunched_week(ctx, state, budget=None) -> list["PlannedSession"]:
     last = (span < 7 and goal.target_date is not None
             and row_end >= goal.target_date - timedelta(days=1))
     layout = _tc_layout(caps, full * span / 7, minutes, start, ctx.week_num, blocked,
-                        may_rest=last)
+                        may_rest=last,
+                        max_weekday=getattr(goal, "max_weekday_rides", None))
     library = getattr(state, "library", None) or []
     used = getattr(state, "used_names", None)
     used_set = set(used or ())
@@ -9440,7 +9451,10 @@ def _tc_hold_budget(goal, weeks: list, library: list | None = None,
         layout = _tc_layout(caps, target - f_load, minutes, w.start, w.week_num,
                             blocked, fixed_rides=len(fixed),
                             fixed_z5=sum(1 for x in fixed if _session_is_z5(x)),
-                            may_rest=days < 7 and w is _last)
+                            may_rest=days < 7 and w is _last,
+                            max_weekday=(None if goal.max_weekday_rides is None else
+                                         max(0, goal.max_weekday_rides - sum(
+                                             1 for x in fixed if x.day.weekday() < 5))))
         new_load = f_load + sum(m * TSS_PER_HOUR[st] / 60 for st, m in layout.values())
         if under and not (forced or over or no_rest) and (
                 new_load < load + max(5.0, 0.05 * target)):
@@ -14113,6 +14127,15 @@ def goal_to_dict(g) -> dict:
     return out
 
 
+def _weekday_rides_or_none(v):
+    """0..5, or None for blank / garbage (no limit)."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if 0 <= n <= 5 else None
+
+
 def goal_from_dict(g: dict) -> "Goal":
     """The inverse of goal_to_dict, and the reader for every goal block ever
     written. A key a block lacks takes the value plans were built with before
@@ -14168,6 +14191,7 @@ def goal_from_dict(g: dict) -> "Goal":
         distribution=pick("distribution", "polarized"),
         block_periodization=bool(pick("block_periodization", False)),
         vo2_microintervals_only=bool(pick("vo2_microintervals_only", False)),
+        max_weekday_rides=_weekday_rides_or_none(pick("max_weekday_rides")),
         events=_target_events_from_dicts(g.get("events")),
         plan_mode=pick("plan_mode", "auto"),
         template_id=pick("template_id", "") or "",
