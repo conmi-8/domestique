@@ -5069,6 +5069,7 @@ def load_workout_library() -> list[dict]:
         cut_s = info["orig_s"] - info["new_s"]
         r2 = dict(r)
         r2["Duration(min)"] = round(info["new_s"] / 60, 1)
+        r2["FullDuration(min)"] = r.get("Duration(min)")
         # ponytail: the removed warm-up is costed at IF 0.6 (36 TSS/h); exact
         # would re-sum the trimmed file's power, not worth a second parse.
         r2["TSS"] = max(0.0, round(float(r.get("TSS") or 0) - cut_s / 3600 * 36, 1))
@@ -8989,13 +8990,52 @@ def _tc_z5_count(ride_days: int) -> int:
 _TC_LIB_VIEWS: dict = {}
 
 
-def _tc_library(library: list, z5: bool) -> list:
+def _tc_share(r: dict, zones) -> float:
+    """Share of the ridden (warm-up-trimmed) time spent in ``zones``."""
+    full = float(r.get("FullDuration(min)") or r.get("Duration(min)") or 0)
+    ridden = float(r.get("Duration(min)") or 0)
+    if ridden <= 0:
+        return 0.0
+    return sum(float(r.get(f"Z{i}%") or 0) for i in zones) / 100 * full / ridden
+
+
+def _tc_is_dense(r: dict, z5: bool) -> bool:
+    """A time-crunched file is mostly work: Z3+ >= 50 % of the ridden time
+    (Z5 days: Z5+ >= 15 % and Z3+ >= 35 %, the recoveries of 1:1 reps)."""
+    if z5:
+        return _tc_share(r, (5, 6)) >= 0.15 and _tc_share(r, (3, 4, 5, 6)) >= 0.35
+    return _tc_share(r, (3, 4, 5, 6)) >= 0.5
+
+
+def _tc_match(s, library, z5: bool, **match_kw):
+    """match_zwo on the dense time-crunched rows, then on the content-only
+    rows when no dense file fits the slot (a wrong-density file beats none)."""
+    out = None
+    for dense in (True, False):
+        pool = _tc_library(library, z5, dense)
+        if not pool:
+            continue
+        try:
+            out = match_zwo(s, pool, **match_kw)
+        except NoCandidateWorkoutError:
+            out = None
+            if not dense:
+                raise
+            continue
+        if out is not None and getattr(out, "zwo_file", ""):
+            return out
+    if out is None and not match_kw.get("raise_on_empty"):
+        return match_zwo(s, library, **match_kw)
+    return out
+
+
+def _tc_library(library: list, z5: bool, dense: bool = False) -> list:
     """The rows a time-crunched slot may be served, by CONTENT (B8'): a
     vo2max slot only Z5 content, every other slot neither Z5 nor endurance
     content -- a "vo2max" slot handed a sweetspot file is not a Z5 day. A
     vo2max slot's rows are the VO2 ones (B8''), every Z5 file only when the
     library has none."""
-    key = (id(library), z5)
+    key = (id(library), z5, dense)
     hit = _TC_LIB_VIEWS.get(key)
     if hit is not None and hit[0] is library:
         return hit[1]
@@ -9007,6 +9047,10 @@ def _tc_library(library: list, z5: bool) -> list:
     if z5:
         rows = [r for r in rows if _content_class_for_zwo(r.get("File") or "")
                 in _VO2_CONTENT_CLASSES] or rows
+    if dense:
+        # Short & hard means the ridden minutes are work: a "VO2max 33min"
+        # with one minute at Z5 and 80 % Z1/Z2 is not served here.
+        rows = [r for r in rows if _tc_is_dense(r, z5)]
     if len(_TC_LIB_VIEWS) > 8:
         _TC_LIB_VIEWS.clear()
     _TC_LIB_VIEWS[key] = (library, rows)
@@ -9030,8 +9074,7 @@ def _tc_retype(s, st: str, library, why: str, **match_kw) -> None:
     s.description = f"{CAL_SESSION_LABEL_SAFE(st)} ({dur}min) — {why}"
     if library:
         try:
-            match_zwo(s, _tc_library(library, st in _Z5_SESSION_TYPES) or library,
-                      **match_kw)
+            _tc_match(s, library, st in _Z5_SESSION_TYPES, **match_kw)
         except Exception:  # noqa: BLE001 — a missing file beats a crash
             log.debug("time-crunched match failed for %s", s.day, exc_info=True)
     if (s.duration_min or 0) > dur:     # a match never lengthens the day
@@ -11742,7 +11785,7 @@ def _demote_hit_window(weeks: list, center_date, days: int, library=None,
                     tss_estimate=round(dur / 60 * TSS_PER_HOUR[st]),
                     description=note,
                 )
-                m = match_zwo(cand, (_tc_library(lib, False) or lib) if crunched else lib)
+                m = _tc_match(cand, lib, False) if crunched else match_zwo(cand, lib)
                 w.sessions[off] = m if (m and getattr(m, "zwo_file", "")) else cand
 
 
@@ -13041,9 +13084,8 @@ def reforecast(
         try:
             if _rematch_library is None:
                 _rematch_library = load_workout_library()
-            match_zwo(sess, (_tc_library(_rematch_library,
-                                         sess.session_type in _Z5_SESSION_TYPES)
-                             or _rematch_library) if _crunched else _rematch_library,
+            (_tc_match if _crunched else (lambda s_, lib_, _z5, **kw: match_zwo(s_, lib_, **kw)))(
+                      sess, _rematch_library, sess.session_type in _Z5_SESSION_TYPES,
                       week_num=pw_.week_num,
                       day_idx=(sess.day - pw_.start).days,
                       used_names={sess.zwo_name} if sess.zwo_name else set(),

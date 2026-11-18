@@ -708,3 +708,28 @@ def test_t3_the_builder_lays_out_the_budget_it_is_given():
                 tp.time_crunched_week(ctx, state, SimpleNamespace(tss_per_week=60))):
         load = sum(float(s.tss_estimate or 0) for s in out if s.session_type != "rest")
         assert 0.85 * 60 <= load <= 1.05 * 60 + 0.5, [(s.session_type, s.duration_min) for s in out]
+
+
+@pytest.mark.parametrize("name", sorted(GOALS))
+def test_time_crunched_rides_are_mostly_work(name, freeze_clock):
+    """Short & hard: a Z3/Z4 day's file is >= 50 % Z3+ of its ridden time (no
+    "Threshold 30min" that is 67 % Z1/Z2). Most rides, not every: a slot with
+    no dense file in its length band still gets a file (the fallback)."""
+    freeze_clock(MONDAY)
+    lib = {r["File"]: r for r in tp.load_workout_library()}
+    rows = [lib[s.zwo_file] for w in _weeks(name) for s in _rides(w)
+            if s.session_type != "vo2max" and s.zwo_file in lib]
+    assert rows
+    dense = sum(tp._tc_is_dense(r, False) for r in rows)
+    assert dense / len(rows) >= 0.8, (dense, len(rows))
+
+
+def test_the_dense_filter_drops_a_mostly_easy_file():
+    easy = {"File": "x.zwo", "Duration(min)": 30, "Z1%": 13, "Z2%": 54,
+            "Z3%": 13, "Z4%": 10, "Z5%": 7, "Z6%": 3}
+    work = dict(easy, **{"Z1%": 10, "Z2%": 20, "Z3%": 40, "Z4%": 30, "Z5%": 0, "Z6%": 0})
+    assert not tp._tc_is_dense(easy, False)
+    assert tp._tc_is_dense(work, False)
+    # the trimmed warm-up raises the share of what is ridden
+    trimmed = dict(easy, **{"Duration(min)": 20, "FullDuration(min)": 30})
+    assert tp._tc_share(trimmed, (3, 4, 5, 6)) == pytest.approx(0.33 * 1.5)
