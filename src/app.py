@@ -6010,12 +6010,17 @@ def api_workout_detail(category: str, filename: str, view: str | None = Query(No
         path = _workout_file(category, filename)
     if not path or not path.exists():
         return JSONResponse({"error": "not found"}, 404)
+    from profile_manager import ProfileManager
+    _pm = ProfileManager.get()
+    # Show the workout as it will be sent: Settings -> Max warm-up applies
+    # here too, so the chart, Warm·Main·Cool and duration match the ride.
+    import warmup_trim
     try:
-        tree = ET.parse(path)
+        _raw, _trim = warmup_trim.trim_for_export(path.read_bytes(), path.name, _pm)
+        root = ET.fromstring(_raw)
     except ET.ParseError:
         return JSONResponse({"error": "parse error"}, 400)
 
-    root = tree.getroot()
     name = (root.findtext("name") or filename).strip()
     desc = (root.findtext("description") or "").strip()
     workout_el = root.find("workout")
@@ -6030,8 +6035,6 @@ def api_workout_detail(category: str, filename: str, view: str | None = Query(No
     # single-source converter so the detail chart shows exactly what the FIT
     # builder will put on the head unit. Power mode payload is unchanged
     # (unless view='hr' explicitly asks for the peek).
-    from profile_manager import ProfileManager
-    _pm = ProfileManager.get()
     if view == "hr":
         _hr_mode = _pm.lthr_is_set and _pm.max_hr > _pm.lthr
     elif view == "power":
@@ -6128,6 +6131,7 @@ def api_workout_detail(category: str, filename: str, view: str | None = Query(No
         # Whether the ⚡/❤ peek toggle can offer an HR view at all (needs a
         # sane LTHR — same invariant as the settings gate).
         "hr_available": bool(_pm.lthr_is_set and _pm.max_hr > _pm.lthr),
+        "warmup_trimmed": _trim is not None,
     }
 
     # task #24: measured-capacity short-rep advisory for the modal. Built from a

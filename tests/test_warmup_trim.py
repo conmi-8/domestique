@@ -819,3 +819,18 @@ def test_C9_title_authored_off_its_own_total_still_shifts():
     assert wt.retitle("Neuromuscular (60min)", 62 * 60, 56 * 60) == "Neuromuscular (54min)"
     # two bracketed totals: ambiguous, left alone
     assert wt.retitle("A (60min) B (10min)", 62 * 60, 56 * 60) == "A (60min) B (10min)"
+
+
+def test_the_workout_view_shows_the_trimmed_warmup(stub):
+    """The plan/library detail view (chart, Warm·Main·Cool, duration) shows
+    the workout as it will be sent, not the file's full warm-up."""
+    full = stub.client.get(f"/api/workout/all/{WARMUP_EL}").json()
+    assert full["warmup_trimmed"] is False
+    assert _set(stub, 2).status_code == 200
+    short = stub.client.get(f"/api/workout/all/{WARMUP_EL}").json()
+    assert short["warmup_trimmed"] is True
+    assert short["segments"][0]["duration"] == 120
+    assert short["total_seconds"] < full["total_seconds"]
+    test = stub.client.get(f"/api/workout/all/{RAMP_TEST}").json()
+    assert test["warmup_trimmed"] is False
+    assert (stub.workouts / WARMUP_EL).read_bytes() == stub.disk[WARMUP_EL]
