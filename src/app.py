@@ -14751,6 +14751,7 @@ SESSION_FIELDS_LOCKED: frozenset[str] = frozenset({
     # enriched (added by _enrich_plan_for_response)
     "card_state", "card_state_v2", "content_class", "display_name",
     "zone_dist", "score", "protocol", "zwo_duration_min", "zwo_tss",
+    "shape",
     # availability (v1.3.5+)
     "availability_hours", "availability_type",
 })
@@ -14846,6 +14847,74 @@ _ENRICH_CACHE: dict[str, tuple[float, dict]] = {}
 _ENRICH_CACHE_TTL = 300  # 5 min
 
 
+_SHAPE_CACHE: dict = {}
+
+
+def _plan_session_shape(zwo: str):
+    """(blocks, zone_dist) of ``zwo`` as it will be sent: Settings -> Max
+    warm-up applied, segments in time order. blocks = [{min, pctLow,
+    pctHigh}], intervals expanded and ramps cut into 1-min steps;
+    zone_dist = % of time per zone, same bands as the library. None when
+    the file can't be read."""
+    path = _workout_file(zwo) if zwo else None
+    if not path or not path.exists():
+        return None
+    try:
+        from profile_manager import ProfileManager
+        _pm = ProfileManager.get()
+        key = (zwo, path.stat().st_mtime, _warmup_trim.setting(_pm))
+        if key in _SHAPE_CACHE:
+            return _SHAPE_CACHE[key]
+        raw, _ = _warmup_trim.trim_for_export(path.read_bytes(), path.name, _pm)
+        workout_el = ET.fromstring(raw).find("workout")
+    except Exception:
+        return None
+    if workout_el is None:
+        return None
+    pieces: list[tuple[float, float]] = []   # (seconds, %FTP)
+    for el in workout_el:
+        try:
+            if el.tag in ("Warmup", "Cooldown", "Ramp"):
+                dur = float(el.get("Duration", 0) or 0)
+                lo = float(el.get("PowerLow", 0.5)); hi = float(el.get("PowerHigh", 0.7))
+                if el.tag == "Warmup":
+                    lo, hi = min(lo, hi), max(lo, hi)
+                elif el.tag == "Cooldown":
+                    lo, hi = max(lo, hi), min(lo, hi)
+                n = max(1, round(dur / 60))
+                for i in range(n):
+                    pieces.append((dur / n, (lo + (hi - lo) * (i + 0.5) / n) * 100))
+            elif el.tag == "SteadyState":
+                pieces.append((float(el.get("Duration", 0) or 0),
+                               float(el.get("Power", 0.65)) * 100))
+            elif el.tag == "IntervalsT":
+                on_d = float(el.get("OnDuration", 0) or 0)
+                off_d = float(el.get("OffDuration", 0) or 0)
+                on_p = float(el.get("OnPower", 1.0)) * 100
+                off_p = float(el.get("OffPower", 0.5)) * 100
+                for _ in range(int(float(el.get("Repeat", 1) or 1))):
+                    pieces += [(on_d, on_p), (off_d, off_p)]
+            elif el.tag == "FreeRide":
+                pieces.append((float(el.get("Duration", 0) or 0), 65.0))
+        except (TypeError, ValueError):
+            continue
+    pieces = [(d, p) for d, p in pieces if d > 0]
+    total = sum(d for d, _ in pieces)
+    if total <= 0:
+        return None
+    zsec = dict.fromkeys(("z1", "z2", "z3", "z4", "z5", "z6"), 0.0)
+    for d, p in pieces:
+        z = ("z1" if p < 56 else "z2" if p < 76 else "z3" if p < 91
+             else "z4" if p < 106 else "z5" if p < 121 else "z6")
+        zsec[z] += d
+    blocks = [{"min": round(d / 60, 3), "pctLow": round(p), "pctHigh": round(p)}
+              for d, p in pieces]
+    out = (blocks, {k: round(v / total * 100, 1) for k, v in zsec.items()})
+    # ponytail: unbounded per (file, mtime, setting) — a plan has <200 files.
+    _SHAPE_CACHE[key] = out
+    return out
+
+
 def _enrich_plan_for_response(plan_dict: dict, today_iso: str) -> dict:
     """v1.4.0 — single enrichment helper (CALENDAR_REDESIGN §5b).
     v1.4.2 — wrapped with mtime-keyed cache; uncached body lives in
@@ -14893,7 +14962,7 @@ def _enrich_plan_for_response(plan_dict: dict, today_iso: str) -> dict:
 # Snapshot/apply on the cache hot path uses this list.
 _ENRICH_FIELDS = (
     "display_name", "zwo_duration_min", "zone_dist", "score", "protocol",
-    "content_class", "card_state", "card_state_v2", "zwo_tss",
+    "content_class", "card_state", "card_state_v2", "zwo_tss", "shape",
 )
 
 
@@ -14974,6 +15043,12 @@ def _enrich_plan_for_response_uncached(plan_dict: dict, today_iso: str) -> dict:
                     "z3": meta.get("Z3%", 0), "z4": meta.get("Z4%", 0),
                     "z5": meta.get("Z5%", 0), "z6": meta.get("Z6%", 0),
                 }
+                # The card draws the file as it will be ridden (warm-up
+                # trimmed), in time order — not zone totals, which lumped
+                # every rest, warm-up and cool-down into one big Z1 block.
+                _shape = _plan_session_shape(zwo)
+                if _shape:
+                    s["shape"], s["zone_dist"] = _shape
                 s["score"] = meta.get("Score")
                 s["protocol"] = meta.get("Protocol")
                 s["content_class"] = meta.get("content_class") or ""

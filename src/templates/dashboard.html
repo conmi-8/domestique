@@ -13472,7 +13472,12 @@ async function renderPlanJSON(plan) {
         // it can't silently pose as the matched file's structure.
         const zdOk = !!(s.zwo_file && s.zone_dist
                         && Object.values(s.zone_dist).some(v => v > 0));
-        const blocks = zdOk
+        // s.shape: the matched file as it will be ridden (warm-up trimmed),
+        // in time order — intervals keep their on/off look instead of all
+        // the rest time stacking up as one Z1 block.
+        const blocks = (zdOk && Array.isArray(s.shape) && s.shape.length)
+          ? s.shape
+          : zdOk
           ? buildPowerBlocksFromZoneDist(s.zone_dist, s.duration_min)
           : buildPowerBlocks(s.session_type, s.duration_min, 250, s.secondary_flags || null);
         const spriteTip = zdOk
@@ -14091,10 +14096,12 @@ function plannedCardParts(planned, cardState) {
 // v3.4.4 — tooltip for the grid mini-sprite: names the zones it shows, from
 // the MATCHED file's zone distribution (same per-file source as the title).
 function pgZoneTooltip(zd) {
-  const NAMES = { z1: 'Z1 recovery', z2: 'Z2 endurance', z3: 'Z3 tempo',
+  // Hardest first; Z1 in an interval file is the rests + warm-up/cool-down,
+  // so it says so instead of reading like a recovery ride.
+  const NAMES = { z1: 'Z1 rest/warm-up/cool-down', z2: 'Z2 endurance', z3: 'Z3 tempo',
                   z4: 'Z4 threshold', z5: 'Z5 VO2', z6: 'Z6 anaerobic' };
   const parts = [];
-  for (const k of ['z1', 'z2', 'z3', 'z4', 'z5', 'z6']) {
+  for (const k of ['z6', 'z5', 'z4', 'z3', 'z2', 'z1']) {
     const v = Math.round((zd && zd[k]) || 0);
     if (v > 0) parts.push(`${NAMES[k]} ${v}%`);
   }

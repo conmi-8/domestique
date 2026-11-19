@@ -857,3 +857,27 @@ def test_app_wires_the_setting_into_the_planner(stub):
     assert tp.warmup_max_provider() is None
     assert _set(stub, 4).status_code == 200
     assert tp.warmup_max_provider() == 4
+
+
+def test_the_plan_card_draws_the_trimmed_file_in_time_order(stub):
+    """The plan card's sprite + zone mix come from the file as it will be
+    ridden, in time order — not zone totals of the untrimmed file, which
+    drew interval sessions as one big Z1 block."""
+    full = app_module._plan_session_shape(WARMUP_EL)
+    assert full is not None
+    assert _set(stub, 2).status_code == 200
+    blocks, zd = app_module._plan_session_shape(WARMUP_EL)
+    seg_s = sum(s["duration"] for s in
+                stub.client.get(f"/api/workout/all/{WARMUP_EL}").json()["segments"])
+    assert abs(sum(b["min"] for b in blocks) * 60 - seg_s) < 2
+    assert sum(b["min"] for b in blocks) < sum(b["min"] for b in full[0])
+    assert abs(sum(zd.values()) - 100) < 0.5
+    # time order: the first block is the (trimmed) warm-up, not the zone
+    # with the most minutes
+    assert blocks[0]["pctLow"] < 76
+    plan = {"weeks": [{"sessions": [{"day": "2026-01-05", "zwo_file": WARMUP_EL,
+                                     "session_type": "vo2max", "duration_min": 30}]}]}
+    app_module._enrich_plan_for_response_uncached(plan, "2026-01-01")
+    s = plan["weeks"][0]["sessions"][0]
+    assert s["shape"] == blocks and s["zone_dist"] == zd
+    assert "shape" in app_module.SESSION_FIELDS_LOCKED
