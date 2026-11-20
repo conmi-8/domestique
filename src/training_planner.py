@@ -8993,52 +8993,62 @@ def _tc_z5_count(ride_days: int) -> int:
 _TC_LIB_VIEWS: dict = {}
 
 
-def _tc_share(r: dict, zones) -> float:
-    """Share of the ridden (warm-up-trimmed) time spent in ``zones``."""
-    full = float(r.get("FullDuration(min)") or r.get("Duration(min)") or 0)
-    ridden = float(r.get("Duration(min)") or 0)
-    if ridden <= 0:
-        return 0.0
-    return sum(float(r.get(f"Z{i}%") or 0) for i in zones) / 100 * full / ridden
-
-
-def _tc_is_dense(r: dict, z5: bool) -> bool:
-    """A time-crunched file is mostly work: Z3+ >= 50 % of the ridden time
-    (Z5 days: Z5+ >= 15 % and Z3+ >= 35 %, the recoveries of 1:1 reps)."""
-    if z5:
-        return _tc_share(r, (5, 6)) >= 0.15 and _tc_share(r, (3, 4, 5, 6)) >= 0.35
-    return _tc_share(r, (3, 4, 5, 6)) >= 0.5
+def _tc_tss_per_hour(r: dict) -> float:
+    """TSS per ridden hour of a library row (its trimmed TSS / trimmed length)."""
+    dur = float(r.get("Duration(min)") or 0)
+    return float(r.get("TSS") or 0) / dur * 60 if dur > 0 else 0.0
 
 
 def _tc_match(s, library, z5: bool, **match_kw):
-    """match_zwo on the dense time-crunched rows, then on the content-only
-    rows when no dense file fits the slot (a wrong-density file beats none)."""
-    out = None
-    for dense in (True, False):
-        pool = _tc_library(library, z5, dense)
-        if not pool:
-            continue
-        try:
-            out = match_zwo(s, pool, **match_kw)
-        except NoCandidateWorkoutError:
-            out = None
-            if not dense:
-                raise
-            continue
-        if out is not None and getattr(out, "zwo_file", ""):
+    """Serve the time-crunched slot the file that carries its TSS budget
+    (within match_zwo's 10 % tolerance) in the fewest minutes: short & hard
+    is the most load per minute, so files are ranked by TSS per hour -- no
+    zone-share cut-off -- never longer than the slot, files not yet used in
+    the plan first. No such file: the slot-length band (match_zwo's 25 % /
+    15 min) ranked the same way; then match_zwo on the slot's content; none
+    at all: the whole library."""
+    pool = _tc_library(library, z5)
+    target = int(getattr(s, "duration_min", 0) or 0)
+    budget = float(getattr(s, "tss_estimate", 0) or 0)
+    if pool and target > 0:
+        def _d(r):
+            return float(r.get("Duration(min)") or 0)
+
+        def _t(r):
+            return float(r.get("TSS") or 0)
+        tol = _MATCH_BUDGET_TOLERANCE
+        fit = ([r for r in pool if _RIDE_FLOOR_MIN <= _d(r) <= target + 1
+                and budget / tol <= _t(r) <= budget * tol] if budget > 0 else [])
+        if not fit:
+            gate = max(15.0, target * 0.25)
+            fit = [r for r in pool if target - gate <= _d(r) <= target + 1]
+        used = match_kw.get("used_names") or ()
+        fit.sort(key=lambda r: (r.get("Name") in used, -_tc_tss_per_hour(r)))
+        kw = dict(match_kw, raise_on_empty=False)
+        # ponytail: one match_zwo call per row until its type gate admits
+        # one; fine for a few hundred rows a slot.
+        for r in fit:
+            # the slot takes the file's own length (never longer than the
+            # slot), so match_zwo's length gate admits it
+            s.duration_min = min(target, max(1, round(_d(r))))
+            out = match_zwo(s, [r], **kw)
+            if out is not None and getattr(out, "zwo_file", ""):
+                return out
+        s.duration_min = target
+    if pool:
+        out = match_zwo(s, pool, **match_kw)
+        if (out is not None and getattr(out, "zwo_file", "")) or match_kw.get("raise_on_empty"):
             return out
-    if out is None and not match_kw.get("raise_on_empty"):
-        return match_zwo(s, library, **match_kw)
-    return out
+    return match_zwo(s, library, **match_kw)
 
 
-def _tc_library(library: list, z5: bool, dense: bool = False) -> list:
+def _tc_library(library: list, z5: bool) -> list:
     """The rows a time-crunched slot may be served, by CONTENT (B8'): a
     vo2max slot only Z5 content, every other slot neither Z5 nor endurance
     content -- a "vo2max" slot handed a sweetspot file is not a Z5 day. A
     vo2max slot's rows are the VO2 ones (B8''), every Z5 file only when the
     library has none."""
-    key = (id(library), z5, dense)
+    key = (id(library), z5)
     hit = _TC_LIB_VIEWS.get(key)
     if hit is not None and hit[0] is library:
         return hit[1]
@@ -9050,10 +9060,6 @@ def _tc_library(library: list, z5: bool, dense: bool = False) -> list:
     if z5:
         rows = [r for r in rows if _content_class_for_zwo(r.get("File") or "")
                 in _VO2_CONTENT_CLASSES] or rows
-    if dense:
-        # Short & hard means the ridden minutes are work: a "VO2max 33min"
-        # with one minute at Z5 and 80 % Z1/Z2 is not served here.
-        rows = [r for r in rows if _tc_is_dense(r, z5)]
     if len(_TC_LIB_VIEWS) > 8:
         _TC_LIB_VIEWS.clear()
     _TC_LIB_VIEWS[key] = (library, rows)

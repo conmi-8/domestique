@@ -711,28 +711,41 @@ def test_t3_the_builder_lays_out_the_budget_it_is_given():
 
 
 @pytest.mark.parametrize("name", sorted(GOALS))
-def test_time_crunched_rides_are_mostly_work(name, freeze_clock):
-    """Short & hard: a Z3/Z4 day's file is >= 50 % Z3+ of its ridden time (no
-    "Threshold 30min" that is 67 % Z1/Z2). Most rides, not every: a slot with
-    no dense file in its length band still gets a file (the fallback)."""
+def test_time_crunched_files_are_not_cut_short(name, freeze_clock):
+    """A time-crunched ride's file is no longer than its slot, so it is
+    ridden whole -- most rides (a slot with no file in its band falls back)."""
     freeze_clock(MONDAY)
     lib = {r["File"]: r for r in tp.load_workout_library()}
-    rows = [lib[s.zwo_file] for w in _weeks(name) for s in _rides(w)
-            if s.session_type != "vo2max" and s.zwo_file in lib]
-    assert rows
-    dense = sum(tp._tc_is_dense(r, False) for r in rows)
-    assert dense / len(rows) >= 0.8, (dense, len(rows))
+    rides = [s for w in _weeks(name) for s in _rides(w)
+             if _training(s) and s.zwo_file in lib]
+    assert rides
+    cut = [s for s in rides if s.duration_min < lib[s.zwo_file]["Duration(min)"] - 2]
+    assert len(cut) / len(rides) <= 0.15, (len(cut), len(rides))
 
 
-def test_the_dense_filter_drops_a_mostly_easy_file():
-    easy = {"File": "x.zwo", "Duration(min)": 30, "Z1%": 13, "Z2%": 54,
-            "Z3%": 13, "Z4%": 10, "Z5%": 7, "Z6%": 3}
-    work = dict(easy, **{"Z1%": 10, "Z2%": 20, "Z3%": 40, "Z4%": 30, "Z5%": 0, "Z6%": 0})
-    assert not tp._tc_is_dense(easy, False)
-    assert tp._tc_is_dense(work, False)
-    # the trimmed warm-up raises the share of what is ridden
-    trimmed = dict(easy, **{"Duration(min)": 20, "FullDuration(min)": 30})
-    assert tp._tc_share(trimmed, (3, 4, 5, 6)) == pytest.approx(0.33 * 1.5)
+@pytest.mark.parametrize("st,mins", [("tempo", 30), ("sweetspot", 40), ("vo2max", 30)])
+def test_the_slot_takes_its_load_in_the_fewest_minutes(st, mins):
+    """Short & hard: of the files carrying the slot's TSS budget, no longer
+    than the slot and of its type, the matcher serves the one with the most
+    TSS per hour -- a ranking, no zone-share cut-off."""
+    lib = tp.load_workout_library()
+    z5 = st in tp._Z5_SESSION_TYPES
+    budget = round(mins / 60 * tp.TSS_PER_HOUR[st])
+    tol = tp._MATCH_BUDGET_TOLERANCE
+
+    def _slot(m=mins):
+        return tp.PlannedSession(day=MONDAY, day_name="Mon", session_type=st,
+                                 duration_min=m, tss_estimate=budget, description="")
+    fit = [r for r in tp._tc_library(lib, z5)
+           if tp._RIDE_FLOOR_MIN <= r["Duration(min)"] <= mins + 1
+           and budget / tol <= r["TSS"] <= budget * tol]
+    ok = [r for r in fit if tp.match_zwo(_slot(min(mins, round(r["Duration(min)"]))),
+                                         [r]).zwo_file]
+    assert ok
+    s = _slot()
+    tp._tc_match(s, lib, z5)
+    assert s.zwo_file == max(ok, key=tp._tc_tss_per_hour)["File"]
+    assert s.duration_min <= mins
 
 
 @pytest.mark.parametrize("limit", [0, 1, 2, 3])
